@@ -1,0 +1,283 @@
+"""
+전략 평가 모듈
+
+수박게임 공략 전략을 기반으로 게임 상태를 평가합니다.
+"""
+
+import logging
+from typing import List, Dict, Tuple
+from models.coin import Coin, CoinType
+
+
+logger = logging.getLogger(__name__)
+
+
+class StrategyEvaluator:
+    """수박게임 전략 기반 상태 평가 클래스"""
+    
+    def __init__(
+        self,
+        game_width: int,
+        game_height: int,
+        weight_large_coin: float = 10.0,
+        weight_adjacency: float = 5.0,
+        weight_height_penalty: float = -2.0,
+        weight_corner_bonus: float = 3.0,
+        weight_blocking_penalty: float = -20.0,
+        prefer_corner: bool = True,
+        left_to_right: bool = True
+    ):
+        """
+        Args:
+            game_width: 게임 영역 너비
+            game_height: 게임 영역 높이
+            weight_large_coin: 큰 동전 보너스 가중치
+            weight_adjacency: 인접도 보너스 가중치
+            weight_height_penalty: 높이 페널티 가중치
+            weight_corner_bonus: 구석 배치 보너스 가중치
+            weight_blocking_penalty: 블로킹 페널티 가중치
+            prefer_corner: 큰 동전을 구석에 배치하는 전략 사용
+            left_to_right: 좌→우 정렬 전략 사용
+        """
+        self.game_width = game_width
+        self.game_height = game_height
+        
+        # 가중치
+        self.weight_large_coin = weight_large_coin
+        self.weight_adjacency = weight_adjacency
+        self.weight_height_penalty = weight_height_penalty
+        self.weight_corner_bonus = weight_corner_bonus
+        self.weight_blocking_penalty = weight_blocking_penalty
+        
+        # 전략 플래그
+        self.prefer_corner = prefer_corner
+        self.left_to_right = left_to_right
+        
+        logger.info("StrategyEvaluator 초기화 완료")
+    
+    def evaluate(self, coins: List[Coin]) -> float:
+        """
+        게임 상태 종합 평가
+        
+        Args:
+            coins: 현재 게임 상태의 동전 리스트
+            
+        Returns:
+            평가 점수 (높을수록 좋음)
+        """
+        if not coins:
+            return 0.0
+        
+        score = 0.0
+        
+        # 1. 큰 동전 보너스
+        score += self._evaluate_large_coins(coins)
+        
+        # 2. 같은 동전 인접도 보너스
+        score += self._evaluate_adjacency(coins)
+        
+        # 3. 높이 페널티
+        score += self._evaluate_height(coins)
+        
+        # 4. 구석 배치 보너스
+        if self.prefer_corner:
+            score += self._evaluate_corner_placement(coins)
+        
+        # 5. 블로킹 페널티
+        score += self._evaluate_blocking(coins)
+        
+        # 6. 좌우 정렬 보너스
+        if self.left_to_right:
+            score += self._evaluate_sorting(coins)
+        
+        return score
+    
+    def _evaluate_large_coins(self, coins: List[Coin]) -> float:
+        """큰 동전 보너스 계산"""
+        score = 0.0
+        
+        for coin in coins:
+            # 레벨이 높을수록 높은 점수
+            score += coin.coin_type.level * self.weight_large_coin
+        
+        return score
+    
+    def _evaluate_adjacency(self, coins: List[Coin]) -> float:
+        """같은 동전 인접도 보너스 계산"""
+        score = 0.0
+        
+        for i, coin1 in enumerate(coins):
+            for coin2 in coins[i+1:]:
+                # 같은 종류의 동전만 평가
+                if coin1.coin_type != coin2.coin_type:
+                    continue
+                
+                distance = coin1.distance_to(coin2)
+                
+                # 합체 가능 거리 (반지름 합의 2배 이내)
+                merge_distance = (coin1.radius + coin2.radius) * 2
+                
+                if distance < merge_distance:
+                    # 가까울수록 높은 점수
+                    adjacency_bonus = self.weight_adjacency * (merge_distance - distance) / merge_distance
+                    score += adjacency_bonus
+        
+        return score
+    
+    def _evaluate_height(self, coins: List[Coin]) -> float:
+        """높이 페널티 계산 (높이 쌓일수록 감점)"""
+        if not coins:
+            return 0.0
+        
+        # 가장 높은 동전의 상단 y 좌표
+        min_y = min(coin.y - coin.radius for coin in coins)
+        
+        # 높이가 낮을수록 (y가 클수록) 페널티 감소
+        # 화면 상단(y=0)에 가까울수록 페널티 증가
+        height_penalty = min_y * self.weight_height_penalty
+        
+        return height_penalty
+    
+    def _evaluate_corner_placement(self, coins: List[Coin]) -> float:
+        """구석 배치 보너스 계산"""
+        score = 0.0
+        
+        # 큰 동전만 평가 (레벨 7 이상)
+        large_coins = [c for c in coins if c.coin_type.level >= 7]
+        
+        corner_threshold = self.game_width * 0.2  # 양쪽 20% 영역
+        
+        for coin in large_coins:
+            # 왼쪽 구석
+            if coin.x < corner_threshold:
+                score += self.weight_corner_bonus * coin.coin_type.level
+            # 오른쪽 구석
+            elif coin.x > self.game_width - corner_threshold:
+                score += self.weight_corner_bonus * coin.coin_type.level
+        
+        return score
+    
+    def _evaluate_blocking(self, coins: List[Coin]) -> float:
+        """블로킹 페널티 계산 (작은 동전이 큰 동전 사이에 끼인 경우)"""
+        score = 0.0
+        
+        for coin in coins:
+            # 작은 동전만 평가 (레벨 4 이하)
+            if coin.coin_type.level > 4:
+                continue
+            
+            # 주변에 큰 동전이 있는지 확인
+            nearby_large_coins = []
+            
+            for other in coins:
+                if other.coin_type.level <= 4:
+                    continue
+                
+                distance = coin.distance_to(other)
+                
+                # 근처에 있는 큰 동전
+                if distance < (coin.radius + other.radius) * 3:
+                    nearby_large_coins.append(other)
+            
+            # 양쪽에 큰 동전이 있으면 블로킹으로 간주
+            if len(nearby_large_coins) >= 2:
+                # 좌우에 있는지 확인
+                left_count = sum(1 for c in nearby_large_coins if c.x < coin.x)
+                right_count = sum(1 for c in nearby_large_coins if c.x > coin.x)
+                
+                if left_count > 0 and right_count > 0:
+                    # 블로킹 페널티
+                    score += self.weight_blocking_penalty
+        
+        return score
+    
+    def _evaluate_sorting(self, coins: List[Coin]) -> float:
+        """좌우 정렬 보너스 계산 (작은 동전 왼쪽, 큰 동전 오른쪽)"""
+        score = 0.0
+        
+        if len(coins) < 2:
+            return 0.0
+        
+        # 동전을 x 좌표로 정렬
+        sorted_coins = sorted(coins, key=lambda c: c.x)
+        
+        # 레벨이 증가하는 경향이 있으면 보너스
+        for i in range(len(sorted_coins) - 1):
+            level_diff = sorted_coins[i+1].coin_type.level - sorted_coins[i].coin_type.level
+            
+            if level_diff > 0:
+                # 레벨이 증가하면 보너스
+                score += 2.0 * level_diff
+            elif level_diff < 0:
+                # 레벨이 감소하면 약간의 페널티
+                score -= 0.5 * abs(level_diff)
+        
+        return score
+    
+    def get_evaluation_details(self, coins: List[Coin]) -> Dict[str, float]:
+        """
+        평가 상세 정보 반환 (디버깅용)
+        
+        Args:
+            coins: 동전 리스트
+            
+        Returns:
+            각 평가 항목별 점수
+        """
+        details = {
+            'large_coins': self._evaluate_large_coins(coins),
+            'adjacency': self._evaluate_adjacency(coins),
+            'height': self._evaluate_height(coins),
+            'corner': self._evaluate_corner_placement(coins) if self.prefer_corner else 0.0,
+            'blocking': self._evaluate_blocking(coins),
+            'sorting': self._evaluate_sorting(coins) if self.left_to_right else 0.0,
+            'total': self.evaluate(coins)
+        }
+        
+        return details
+
+
+# 테스트 코드
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    print("=== 전략 평가 테스트 ===\n")
+    
+    # 평가자 생성
+    evaluator = StrategyEvaluator(game_width=600, game_height=800)
+    
+    # 테스트 케이스 1: 좋은 배치
+    good_coins = [
+        Coin(CoinType.COIN_10, x=100, y=750),
+        Coin(CoinType.COIN_10, x=130, y=750),  # 같은 동전 인접
+        Coin(CoinType.COIN_100, x=200, y=750),
+        Coin(CoinType.BILL_10000, x=500, y=750),  # 큰 동전 구석
+    ]
+    
+    print("[좋은 배치]")
+    score = evaluator.evaluate(good_coins)
+    details = evaluator.get_evaluation_details(good_coins)
+    
+    print(f"총점: {score:.1f}")
+    for key, value in details.items():
+        if key != 'total':
+            print(f"  {key}: {value:.1f}")
+    
+    # 테스트 케이스 2: 나쁜 배치
+    bad_coins = [
+        Coin(CoinType.BILL_10000, x=100, y=100),  # 큰 동전이 높이 쌓임
+        Coin(CoinType.COIN_10, x=300, y=750),
+        Coin(CoinType.BILL_5000, x=320, y=750),  # 작은 동전이 큰 동전 사이
+        Coin(CoinType.BILL_5000, x=350, y=750),
+    ]
+    
+    print("\n[나쁜 배치]")
+    score = evaluator.evaluate(bad_coins)
+    details = evaluator.get_evaluation_details(bad_coins)
+    
+    print(f"총점: {score:.1f}")
+    for key, value in details.items():
+        if key != 'total':
+            print(f"  {key}: {value:.1f}")
+    
+    print("\n✅ 테스트 완료")
