@@ -2,6 +2,12 @@
 
 MuMu Player에서 실행되는 **'콘텐츠페이 동전게임'**(수박게임의 변형판)을 실시간으로 분석하여 최적의 동전 낙하 위치를 오버레이로 표시하는 AI 기반 공략 프로그램입니다.
 
+![Game Screen](docs/images/game_screen.png)
+*콘텐츠페이 동전게임 초기 화면*
+
+![Coin Sizes](docs/images/coin_sizes.png)
+*동전 크기 비교*
+
 ## 주요 기능
 
 - **🤖 AI 화면 분석**: Google Gemini 3.0 Flash Preview 모델을 사용하여 게임 화면의 동전 위치와 종류를 자동 인식
