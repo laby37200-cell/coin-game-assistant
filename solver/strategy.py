@@ -248,10 +248,10 @@ if __name__ == "__main__":
     
     # 테스트 케이스 1: 좋은 배치
     good_coins = [
-        Coin(CoinType.COIN_10, x=100, y=750),
-        Coin(CoinType.COIN_10, x=130, y=750),  # 같은 동전 인접
-        Coin(CoinType.COIN_100, x=200, y=750),
-        Coin(CoinType.BILL_10000, x=500, y=750),  # 큰 동전 구석
+        Coin(CoinType.BLACK_THUNDER, x=100, y=750),
+        Coin(CoinType.BLACK_THUNDER, x=130, y=750),  # 같은 동전 인접
+        Coin(CoinType.YELLOW_CIRCLE, x=200, y=750),
+        Coin(CoinType.MINT_GIFTBOX, x=500, y=750),  # 큰 동전 구석
     ]
     
     print("[좋은 배치]")
@@ -265,10 +265,10 @@ if __name__ == "__main__":
     
     # 테스트 케이스 2: 나쁜 배치
     bad_coins = [
-        Coin(CoinType.BILL_10000, x=100, y=100),  # 큰 동전이 높이 쌓임
-        Coin(CoinType.COIN_10, x=300, y=750),
-        Coin(CoinType.BILL_5000, x=320, y=750),  # 작은 동전이 큰 동전 사이
-        Coin(CoinType.BILL_5000, x=350, y=750),
+        Coin(CoinType.MINT_GIFTBOX, x=100, y=100),  # 큰 동전이 높이 쌓임
+        Coin(CoinType.BLACK_THUNDER, x=300, y=750),
+        Coin(CoinType.BLUE_CIRCLE, x=320, y=750),  # 작은 동전이 큰 동전 사이
+        Coin(CoinType.BLUE_CIRCLE, x=350, y=750),
     ]
     
     print("\n[나쁜 배치]")

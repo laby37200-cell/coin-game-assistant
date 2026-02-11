@@ -9,6 +9,7 @@ from typing import List, Tuple, Optional
 from models.coin import Coin, CoinType
 from physics.simulator import PhysicsSimulator
 from solver.strategy import StrategyEvaluator
+from utils.coordinate_mapper import CoordinateMapper
 
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,9 @@ class PositionOptimizer:
         game_height: int,
         algorithm: str = "greedy",
         sample_step: int = 10,
-        lookahead_depth: int = 1
+        lookahead_depth: int = 1,
+        coordinate_mapper: Optional[CoordinateMapper] = None,
+        physics_params: Optional[dict] = None
     ):
         """
         Args:
@@ -38,9 +41,16 @@ class PositionOptimizer:
         self.algorithm = algorithm
         self.sample_step = sample_step
         self.lookahead_depth = lookahead_depth
+        self.coordinate_mapper = coordinate_mapper
+        self.physics_params = physics_params or {}
         
         # 물리 시뮬레이터
-        self.simulator = PhysicsSimulator(game_width, game_height)
+        self.simulator = PhysicsSimulator(
+            game_width,
+            game_height,
+            coordinate_mapper=coordinate_mapper,
+            **self.physics_params,
+        )
         
         # 전략 평가자
         self.evaluator = StrategyEvaluator(game_width, game_height)
@@ -104,14 +114,15 @@ class PositionOptimizer:
         # 모든 위치 시뮬레이션
         for x in x_positions:
             # 물리 시뮬레이션
-            final_coins, _ = self.simulator.simulate_drop(
+            final_coins, sim_score = self.simulator.simulate_drop(
                 current_coins,
                 drop_coin_type,
                 x
             )
             
             # 전략 평가
-            score = self.evaluator.evaluate(final_coins)
+            strategy_score = self.evaluator.evaluate(final_coins)
+            score = sim_score + strategy_score
             
             # 최고 점수 업데이트
             if score > best_score:
@@ -202,14 +213,15 @@ class PositionOptimizer:
             (점수, 시뮬레이션 후 동전 리스트, 평가 상세)
         """
         # 물리 시뮬레이션
-        final_coins, _ = self.simulator.simulate_drop(
+        final_coins, sim_score = self.simulator.simulate_drop(
             current_coins,
             drop_coin_type,
             drop_x
         )
         
         # 전략 평가
-        score = self.evaluator.evaluate(final_coins)
+        strategy_score = self.evaluator.evaluate(final_coins)
+        score = sim_score + strategy_score
         details = self.evaluator.get_evaluation_details(final_coins)
         
         return score, final_coins, details
@@ -264,14 +276,14 @@ if __name__ == "__main__":
     
     # 테스트 게임 상태
     current_coins = [
-        Coin(CoinType.COIN_100, x=200, y=750),
-        Coin(CoinType.COIN_100, x=250, y=750),
-        Coin(CoinType.COIN_50, x=350, y=750),
+        Coin(CoinType.YELLOW_CIRCLE, x=200, y=750),
+        Coin(CoinType.YELLOW_CIRCLE, x=250, y=750),
+        Coin(CoinType.ORANGE_CIRCLE, x=350, y=750),
     ]
     print(f"\n현재 게임 상태: 동전 {len(current_coins)}개")
     
     # 떨어뜨릴 동전
-    drop_coin = CoinType.COIN_100
+    drop_coin = CoinType.YELLOW_CIRCLE
     print(f"떨어뜨릴 동전: {drop_coin.display_name}")
     
     # 최적 위치 찾기

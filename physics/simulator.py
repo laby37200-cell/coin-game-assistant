@@ -11,6 +11,7 @@ from typing import List, Tuple, Optional
 
 from models.coin import Coin, CoinType
 from physics.engine import PhysicsEngine
+from utils.coordinate_mapper import CoordinateMapper
 
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,16 @@ class PhysicsSimulator:
         self,
         game_width: int,
         game_height: int,
+        coordinate_mapper: Optional[CoordinateMapper] = None,
         time_step: float = 1/60,
-        simulation_duration: float = 3.0
+        simulation_duration: float = 3.0,
+        gravity: Tuple[float, float] = (0, -900),
+        damping: float = 0.95,
+        iterations: int = 10,
+        coin_friction: float = 0.5,
+        coin_elasticity: float = 0.3,
+        wall_friction: float = 0.6,
+        wall_elasticity: float = 0.2
     ):
         """
         Args:
@@ -35,11 +44,29 @@ class PhysicsSimulator:
         """
         self.game_width = game_width
         self.game_height = game_height
+        self.coordinate_mapper = coordinate_mapper
         self.time_step = time_step
         self.simulation_duration = simulation_duration
+        self.gravity = gravity
+        self.damping = damping
+        self.iterations = iterations
+        self.coin_friction = coin_friction
+        self.coin_elasticity = coin_elasticity
+        self.wall_friction = wall_friction
+        self.wall_elasticity = wall_elasticity
         
         # 물리 엔진 (재사용)
-        self.engine = PhysicsEngine(game_width, game_height)
+        self.engine = PhysicsEngine(
+            game_width,
+            game_height,
+            gravity=gravity,
+            damping=damping,
+            iterations=iterations,
+            coin_friction=coin_friction,
+            coin_elasticity=coin_elasticity,
+            wall_friction=wall_friction,
+            wall_elasticity=wall_elasticity,
+        )
         
         logger.info(f"PhysicsSimulator 초기화: {game_width}x{game_height}")
     
@@ -56,9 +83,14 @@ class PhysicsSimulator:
         # 엔진 초기화
         self.engine.clear()
         
-        # 모든 동전을 물리 공간에 추가 (정적 바디로)
+        # 모든 동전을 물리 공간에 추가 (동적 바디로)
         for coin in coins:
-            self.engine.add_coin(coin, is_static=True)
+            if self.coordinate_mapper:
+                px, py = self.coordinate_mapper.screen_to_physics(coin.x, coin.y)
+                coin_to_add = Coin(coin_type=coin.coin_type, x=px, y=py, velocity_x=coin.velocity_x, velocity_y=coin.velocity_y)
+            else:
+                coin_to_add = coin
+            self.engine.add_coin(coin_to_add, is_static=False)
         
         logger.debug(f"Digital Twin 생성: 동전 {len(coins)}개 복제")
         
@@ -86,11 +118,16 @@ class PhysicsSimulator:
         # Digital Twin 생성
         self.create_digital_twin(current_coins)
         
-        # 떨어뜨릴 동전 생성
+        # 떨어뜨릴 동전 생성 (입력은 screen coords)
+        if self.coordinate_mapper:
+            phys_x, phys_y = self.coordinate_mapper.screen_to_physics(drop_x, drop_y)
+        else:
+            phys_x, phys_y = drop_x, drop_y
+
         drop_coin = Coin(
             coin_type=drop_coin_type,
-            x=drop_x,
-            y=drop_y
+            x=phys_x,
+            y=phys_y
         )
         
         # 동적 바디로 추가
@@ -101,17 +138,27 @@ class PhysicsSimulator:
         
         for step in range(total_steps):
             self.engine.step(self.time_step)
+            self.engine.process_pending_merges()
             
             # 조기 종료: 안정 상태 도달
             if step > 60 and self.engine.is_stable():  # 최소 1초 후
                 logger.debug(f"안정 상태 도달: step={step}")
                 break
         
-        # 최종 상태 추출
-        final_coins = self.engine.get_all_coins_state()
-        
-        # 점수 계산 (간단한 버전)
-        score = self._calculate_score(final_coins)
+        # 최종 상태 추출 (physics coords)
+        final_phys_coins = self.engine.get_all_coins_state()
+
+        # screen coords로 복원
+        if self.coordinate_mapper:
+            final_coins = []
+            for c in final_phys_coins:
+                sx, sy = self.coordinate_mapper.physics_to_screen(c.x, c.y)
+                final_coins.append(Coin(coin_type=c.coin_type, x=sx, y=sy, velocity_x=c.velocity_x, velocity_y=c.velocity_y))
+        else:
+            final_coins = final_phys_coins
+ 
+        # 점수 계산 (배치 점수 + 합체 점수)
+        score = self._calculate_score(final_coins) + self.engine.pop_merge_score()
         
         logger.debug(f"시뮬레이션 완료: x={drop_x:.1f}, 점수={score:.1f}")
         
@@ -258,15 +305,15 @@ if __name__ == "__main__":
     
     # 테스트 게임 상태 생성
     current_coins = [
-        Coin(CoinType.COIN_100, x=200, y=750),
-        Coin(CoinType.COIN_100, x=250, y=750),
-        Coin(CoinType.COIN_50, x=350, y=750),
+        Coin(CoinType.YELLOW_CIRCLE, x=200, y=750),
+        Coin(CoinType.YELLOW_CIRCLE, x=250, y=750),
+        Coin(CoinType.ORANGE_CIRCLE, x=350, y=750),
     ]
     print(f"\n현재 게임 상태: 동전 {len(current_coins)}개")
     
     # 단일 시뮬레이션 테스트
     print("\n[단일 시뮬레이션 테스트]")
-    drop_coin_type = CoinType.COIN_100
+    drop_coin_type = CoinType.YELLOW_CIRCLE
     drop_x = 225
     
     final_coins, score = simulator.simulate_drop(

@@ -1,6 +1,7 @@
 # 동전게임 실시간 공략 가이드 - 의존성 패키지
 
 # AI/Vision
+google-genai>=1.0.0
 google-generativeai>=0.3.0
 
 # 이미지 처리
@@ -14,6 +15,9 @@ pygetwindow>=0.0.9
 
 # 물리 엔진
 pymunk>=6.5.0
+
+# 빌드
+pyinstaller>=6.0.0
 
 # GUI (tkinter는 Python 기본 포함)
 # tkinter는 별도 설치 불필요 (Python 표준 라이브러리)

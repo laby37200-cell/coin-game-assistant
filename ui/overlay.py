@@ -191,7 +191,11 @@ class OverlayWindow:
     def update(self):
         """윈도우 업데이트 (이벤트 처리)"""
         if self.root:
-            self.root.update()
+            try:
+                self.root.update()
+            except tk.TclError:
+                self.root = None
+                self.canvas = None
     
     def mainloop(self):
         """메인 루프 시작 (블로킹)"""
@@ -201,15 +205,27 @@ class OverlayWindow:
     def close(self):
         """윈도우 종료"""
         if self.root:
-            self.root.quit()
-            self.root.destroy()
-            self.root = None
-            self.canvas = None
-            logger.info("오버레이 윈도우 종료")
+            try:
+                self.root.quit()
+                self.root.destroy()
+            except tk.TclError:
+                pass
+            finally:
+                self.root = None
+                self.canvas = None
+                logger.info("오버레이 윈도우 종료")
     
     def is_open(self) -> bool:
         """윈도우 열림 상태 확인"""
-        return self.root is not None
+        if self.root is None:
+            return False
+        try:
+            self.root.winfo_exists()
+            return True
+        except tk.TclError:
+            self.root = None
+            self.canvas = None
+            return False
 
 
 # 테스트 코드

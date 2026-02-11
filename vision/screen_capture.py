@@ -9,12 +9,25 @@ import numpy as np
 from PIL import Image
 from typing import Optional, Tuple
 import logging
+import ctypes
 
 try:
     import mss
+except ImportError:
+    mss = None
+
+try:
     import pygetwindow as gw
-except ImportError as e:
-    logging.warning(f"Import warning: {e}. Some features may not work on headless systems.")
+except ImportError:
+    gw = None
+
+try:
+    import win32gui
+    import win32ui
+    import win32con
+    _HAS_WIN32 = True
+except ImportError:
+    _HAS_WIN32 = False
 
 
 logger = logging.getLogger(__name__)
@@ -99,23 +112,99 @@ class ScreenCapture:
             logger.error("게임 영역이 설정되지 않았습니다.")
             return None
         
+        # Win32 API 캡처 우선 (GPU 렌더링 에뮬레이터 대응)
+        if _HAS_WIN32 and self.window:
+            img = self._capture_win32()
+            if img is not None:
+                return img
+        
+        # Fallback: mss
+        return self._capture_mss()
+
+    def _capture_win32(self) -> Optional[np.ndarray]:
+        """Win32 PrintWindow/BitBlt 기반 캡처 (GPU 렌더링 대응)"""
+        try:
+            hwnd = self._get_hwnd()
+            if not hwnd:
+                return None
+
+            left, top, right, bottom = win32gui.GetClientRect(hwnd)
+            w = right - left
+            h = bottom - top
+            if w <= 0 or h <= 0:
+                return None
+
+            hwndDC = win32gui.GetWindowDC(hwnd)
+            mfcDC = win32ui.CreateDCFromHandle(hwndDC)
+            saveDC = mfcDC.CreateCompatibleDC()
+
+            saveBitMap = win32ui.CreateBitmap()
+            saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
+            saveDC.SelectObject(saveBitMap)
+
+            # PrintWindow with PW_RENDERFULLCONTENT (flag=2) for GPU content
+            ctypes.windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)
+
+            bmpinfo = saveBitMap.GetInfo()
+            bmpstr = saveBitMap.GetBitmapBits(True)
+
+            img = np.frombuffer(bmpstr, dtype=np.uint8)
+            img = img.reshape((bmpinfo['bmHeight'], bmpinfo['bmWidth'], 4))
+            img = img[:, :, :3]  # BGRA → BGR
+            img = img[:, :, ::-1]  # BGR → RGB
+
+            # 리소스 해제
+            win32gui.DeleteObject(saveBitMap.GetHandle())
+            saveDC.DeleteDC()
+            mfcDC.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hwndDC)
+
+            # 검은 화면 체크
+            if img.mean() < 5:
+                logger.debug("Win32 캡처 결과가 검은 화면 — fallback")
+                return None
+
+            self.last_screenshot = img
+            self.last_capture_time = time.time()
+
+            # game_area 크기 동기화
+            if self.game_area['width'] != w or self.game_area['height'] != h:
+                self.game_area['width'] = w
+                self.game_area['height'] = h
+
+            return img
+
+        except Exception as e:
+            logger.debug(f"Win32 캡처 실패: {e}")
+            return None
+
+    def _get_hwnd(self) -> Optional[int]:
+        """pygetwindow 창 객체에서 Win32 HWND 핸들 추출"""
+        try:
+            if hasattr(self.window, '_hWnd'):
+                return self.window._hWnd
+            # fallback: FindWindow
+            hwnd = win32gui.FindWindow(None, self.window.title)
+            return hwnd if hwnd else None
+        except Exception:
+            return None
+
+    def _capture_mss(self) -> Optional[np.ndarray]:
+        """mss 기반 캡처 (fallback)"""
+        if mss is None:
+            return None
         try:
             with mss.mss() as sct:
-                # 스크린샷 캡처
                 screenshot = sct.grab(self.game_area)
-                
-                # numpy array로 변환 (BGRA → RGB)
                 img = np.array(screenshot)
-                img = img[:, :, :3]  # Alpha 채널 제거
-                img = img[:, :, ::-1]  # BGR → RGB
-                
+                img = img[:, :, :3]
+                img = img[:, :, ::-1]
+
                 self.last_screenshot = img
                 self.last_capture_time = time.time()
-                
                 return img
-                
         except Exception as e:
-            logger.error(f"화면 캡처 실패: {e}")
+            logger.error(f"mss 캡처 실패: {e}")
             return None
     
     def capture_pil(self) -> Optional[Image.Image]:

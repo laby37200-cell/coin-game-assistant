@@ -6,12 +6,27 @@ Google Gemini 3.0 Flash Preview 모델을 사용하여 게임 화면을 분석�
 """
 
 import json
-import base64
-import io
 import logging
+import time
+from collections import deque
 from typing import List, Dict, Optional
 from PIL import Image
-import google.generativeai as genai
+
+try:
+    # New Google Gen AI SDK
+    from google import genai  # type: ignore
+    _HAS_NEW_SDK = True
+except Exception:
+    genai = None
+    _HAS_NEW_SDK = False
+
+try:
+    # Legacy SDK (google-generativeai)
+    import google.generativeai as legacy_genai  # type: ignore
+    _HAS_LEGACY_SDK = True
+except Exception:
+    legacy_genai = None
+    _HAS_LEGACY_SDK = False
 
 from models.coin import Coin, CoinType
 
@@ -26,7 +41,6 @@ class GeminiAnalyzer:
     SYSTEM_PROMPT = """너는 '콘텐츠페이 동전게임'(수박게임의 변형판) 전문 분석가다.
 
 게임 화면 이미지를 분석하여 다음 정보를 JSON 형식으로 정확하게 반환해야 한다:
-
 1. **현재 화면에 있는 모든 동전의 정보**:
    - 동전 종류: 검정번개, 핑크동전, 주황동전, 노랑동전, 민트동전, 파랑동전, 보라동전, 갈색동전, 흰색상자, 노랑전구, 민트선물상자
    - 중심 좌표 (x, y) - 픽셀 단위
@@ -82,7 +96,7 @@ class GeminiAnalyzer:
 - 동전 색상 참고: 검정(번개), 핑크, 주황, 노랑, 민트, 파랑, 보라, 갈색, 흰색, 노랑(전구), 민트(선물상자)
 """
     
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash", max_calls_per_minute: int = 10):
         """
         Args:
             api_key: Google Gemini API 키
@@ -90,12 +104,40 @@ class GeminiAnalyzer:
         """
         self.api_key = api_key
         self.model_name = model_name
+        self.max_calls_per_minute = max_calls_per_minute
+        self._call_timestamps = deque()
         
-        # Gemini API 초기화
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY가 설정되지 않았습니다. 환경 변수를 확인하세요.")
+ 
+        self._client = None
+        self._model = None
+ 
+        # Gemini API 초기화 (신형 SDK 우선)
+        if _HAS_NEW_SDK:
+            self._client = genai.Client(api_key=api_key)
+            self._model = model_name
+        elif _HAS_LEGACY_SDK:
+            legacy_genai.configure(api_key=api_key)
+            self._client = legacy_genai
+            self._model = legacy_genai.GenerativeModel(model_name)
+        else:
+            raise ImportError("Gemini SDK가 설치되지 않았습니다. 'google-genai' 또는 'google-generativeai'를 설치하세요.")
         
         logger.info(f"GeminiAnalyzer 초기화: 모델 = {model_name}")
+
+    def _rate_limit(self):
+        now = time.time()
+        window_start = now - 60.0
+        while self._call_timestamps and self._call_timestamps[0] < window_start:
+            self._call_timestamps.popleft()
+ 
+        if len(self._call_timestamps) >= self.max_calls_per_minute:
+            sleep_s = (self._call_timestamps[0] + 60.0) - now
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+ 
+        self._call_timestamps.append(time.time())
     
     def analyze_image(self, image: Image.Image) -> Optional[Dict]:
         """
@@ -114,15 +156,24 @@ class GeminiAnalyzer:
         """
         try:
             logger.info("Gemini API로 이미지 분석 시작...")
-            
+
+            self._rate_limit()
+             
             # 프롬프트 구성
             prompt = self.SYSTEM_PROMPT + "\n\n이미지를 분석하고 JSON 형식으로 결과를 반환하라."
-            
+             
             # Gemini API 호출
-            response = self.model.generate_content([prompt, image])
-            
+            if _HAS_NEW_SDK and self._client is not None:
+                response = self._client.models.generate_content(
+                    model=self._model,
+                    contents=[prompt, image],
+                )
+                response_text = (response.text or "").strip()
+            else:
+                response = self._model.generate_content([prompt, image])
+                response_text = response.text.strip()
+             
             # 응답 텍스트 추출
-            response_text = response.text.strip()
             logger.debug(f"Gemini 응답: {response_text}")
             
             # JSON 파싱

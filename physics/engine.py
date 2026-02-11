@@ -5,8 +5,9 @@ Pymunk 물리 엔진 래퍼
 """
 
 import pymunk
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Deque
 import logging
+from collections import deque
 
 from models.coin import Coin, CoinType
 
@@ -21,9 +22,13 @@ class PhysicsEngine:
         self,
         game_width: int,
         game_height: int,
-        gravity: Tuple[float, float] = (0, 900),
+        gravity: Tuple[float, float] = (0, -900),
         damping: float = 0.95,
-        iterations: int = 10
+        iterations: int = 10,
+        coin_friction: float = 0.5,
+        coin_elasticity: float = 0.3,
+        wall_friction: float = 0.6,
+        wall_elasticity: float = 0.2
     ):
         """
         Args:
@@ -35,22 +40,37 @@ class PhysicsEngine:
         """
         self.game_width = game_width
         self.game_height = game_height
+        self.gravity = gravity
+        self.damping = damping
+        self.iterations = iterations
+        self.coin_friction = coin_friction
+        self.coin_elasticity = coin_elasticity
+        self.wall_friction = wall_friction
+        self.wall_elasticity = wall_elasticity
         
         # Pymunk Space 생성
         self.space = pymunk.Space()
-        self.space.gravity = gravity
-        self.space.damping = damping
-        self.space.iterations = iterations
+        self.space.gravity = self.gravity
+        self.space.damping = self.damping
+        self.space.iterations = self.iterations
         
         # 바디 추적용 딕셔너리
         self.coin_bodies = {}  # {coin_id: (body, shape)}
         self.wall_bodies = []
+
+        # 합체(merge) 처리
+        self._pending_merges: Deque[Tuple[int, int]] = deque()
+        self._merged_body_ids_in_step: set[Tuple[int, int]] = set()
+        self._merge_score_accum: float = 0.0
         
         logger.info(f"PhysicsEngine 초기화: {game_width}x{game_height}, "
                    f"중력={gravity}, 감쇠={damping}")
         
         # 벽과 바닥 생성
         self._create_walls()
+
+        # 충돌 핸들러 설정 (동일 동전 합체)
+        self._setup_collision_handlers()
     
     def _create_walls(self):
         """게임 영역의 벽과 바닥 생성"""
@@ -60,15 +80,15 @@ class PhysicsEngine:
         # 벽 두께
         wall_thickness = 10
         
-        # 바닥 (y = game_height)
+        # 바닥 (y = 0)  - y-up 좌표계
         floor = pymunk.Segment(
             static_body,
-            (0, self.game_height),
-            (self.game_width, self.game_height),
+            (0, 0),
+            (self.game_width, 0),
             wall_thickness
         )
-        floor.friction = 0.6
-        floor.elasticity = 0.2
+        floor.friction = self.wall_friction
+        floor.elasticity = self.wall_elasticity
         
         # 왼쪽 벽 (x = 0)
         left_wall = pymunk.Segment(
@@ -77,8 +97,8 @@ class PhysicsEngine:
             (0, self.game_height),
             wall_thickness
         )
-        left_wall.friction = 0.6
-        left_wall.elasticity = 0.2
+        left_wall.friction = self.wall_friction
+        left_wall.elasticity = self.wall_elasticity
         
         # 오른쪽 벽 (x = game_width)
         right_wall = pymunk.Segment(
@@ -87,8 +107,8 @@ class PhysicsEngine:
             (self.game_width, self.game_height),
             wall_thickness
         )
-        right_wall.friction = 0.6
-        right_wall.elasticity = 0.2
+        right_wall.friction = self.wall_friction
+        right_wall.elasticity = self.wall_elasticity
         
         # Space에 추가
         self.space.add(floor, left_wall, right_wall)
@@ -100,8 +120,8 @@ class PhysicsEngine:
         self,
         coin: Coin,
         is_static: bool = False,
-        friction: float = 0.5,
-        elasticity: float = 0.3
+        friction: Optional[float] = None,
+        elasticity: Optional[float] = None
     ) -> int:
         """
         동전을 물리 공간에 추가
@@ -131,11 +151,12 @@ class PhysicsEngine:
         
         # 원형 Shape 생성
         shape = pymunk.Circle(body, coin.radius)
-        shape.friction = friction
-        shape.elasticity = elasticity
-        
+        shape.friction = self.coin_friction if friction is None else friction
+        shape.elasticity = self.coin_elasticity if elasticity is None else elasticity
+
         # 동전 타입 정보 저장 (충돌 감지용)
         shape.coin_type = coin.coin_type
+        shape.collision_type = 1
         
         # Space에 추가
         self.space.add(body, shape)
@@ -147,6 +168,79 @@ class PhysicsEngine:
         logger.debug(f"동전 추가: {coin.coin_type.display_name} at ({coin.x:.1f}, {coin.y:.1f})")
         
         return coin_id
+
+    def _setup_collision_handlers(self):
+        # pymunk 7.x uses on_collision() with keyword callbacks
+        self.space.on_collision(
+            collision_type_a=1,
+            collision_type_b=1,
+            begin=self._on_coin_contact_begin,
+        )
+
+    def _on_coin_contact_begin(self, arbiter: pymunk.Arbiter, space: pymunk.Space, data) -> None:
+        try:
+            shape_a, shape_b = arbiter.shapes
+            if getattr(shape_a, "coin_type", None) is None or getattr(shape_b, "coin_type", None) is None:
+                return
+
+            if shape_a.coin_type != shape_b.coin_type:
+                return
+
+            body_a_id = id(shape_a.body)
+            body_b_id = id(shape_b.body)
+            key = (body_a_id, body_b_id) if body_a_id < body_b_id else (body_b_id, body_a_id)
+            if key in self._merged_body_ids_in_step:
+                return
+
+            self._merged_body_ids_in_step.add(key)
+            self._pending_merges.append((body_a_id, body_b_id))
+        except Exception:
+            pass
+
+    def process_pending_merges(self):
+        if not self._pending_merges:
+            self._merged_body_ids_in_step.clear()
+            return
+
+        body_by_id = {id(body): (coin_id, body, shape) for coin_id, (body, shape) in self.coin_bodies.items()}
+        while self._pending_merges:
+            a_id, b_id = self._pending_merges.popleft()
+            if a_id not in body_by_id or b_id not in body_by_id:
+                continue
+
+            coin_id_a, body_a, shape_a = body_by_id[a_id]
+            coin_id_b, body_b, shape_b = body_by_id[b_id]
+            if shape_a.coin_type != shape_b.coin_type:
+                continue
+
+            coin_type: CoinType = shape_a.coin_type
+            next_type = coin_type.get_next_level()
+
+            # 제거
+            self.space.remove(body_a, shape_a)
+            self.space.remove(body_b, shape_b)
+            if coin_id_a in self.coin_bodies:
+                del self.coin_bodies[coin_id_a]
+            if coin_id_b in self.coin_bodies:
+                del self.coin_bodies[coin_id_b]
+
+            # 점수 누적(합체로 얻는 점수는 next 코인의 점수로 가정)
+            if next_type is not None:
+                self._merge_score_accum += float(next_type.score)
+
+                # 새 코인 생성
+                new_x = (body_a.position.x + body_b.position.x) / 2
+                new_y = (body_a.position.y + body_b.position.y) / 2
+                new_coin = Coin(coin_type=next_type, x=new_x, y=new_y)
+                new_coin_id = self.add_coin(new_coin, is_static=False)
+                body_by_id[id(self.coin_bodies[new_coin_id][0])] = (new_coin_id, self.coin_bodies[new_coin_id][0], self.coin_bodies[new_coin_id][1])
+
+        self._merged_body_ids_in_step.clear()
+
+    def pop_merge_score(self) -> float:
+        score = self._merge_score_accum
+        self._merge_score_accum = 0.0
+        return score
     
     def remove_coin(self, coin_id: int):
         """
@@ -162,9 +256,13 @@ class PhysicsEngine:
         body, shape = self.coin_bodies[coin_id]
         
         # Space에서 제거
-        if body.body_type != pymunk.Body.STATIC:
-            self.space.remove(body)
-        self.space.remove(shape)
+        try:
+            self.space.remove(shape, body)
+        except Exception:
+            try:
+                self.space.remove(shape)
+            except Exception:
+                pass
         
         # 딕셔너리에서 제거
         del self.coin_bodies[coin_id]
@@ -267,9 +365,9 @@ class PhysicsEngine:
         """물리 엔진 완전 리셋 (벽 포함 재생성)"""
         # Space 재생성
         self.space = pymunk.Space()
-        self.space.gravity = self.space.gravity
-        self.space.damping = self.space.damping
-        self.space.iterations = self.space.iterations
+        self.space.gravity = self.gravity
+        self.space.damping = self.damping
+        self.space.iterations = self.iterations
         
         # 바디 딕셔너리 초기화
         self.coin_bodies = {}
@@ -277,7 +375,10 @@ class PhysicsEngine:
         
         # 벽 재생성
         self._create_walls()
-        
+
+        # 충돌 핸들러 재설정
+        self._setup_collision_handlers()
+         
         logger.debug("물리 엔진 리셋 완료")
 
 
@@ -293,7 +394,7 @@ if __name__ == "__main__":
     
     # 테스트 동전 생성
     test_coin = Coin(
-        coin_type=CoinType.COIN_100,
+        coin_type=CoinType.YELLOW_CIRCLE,
         x=300,
         y=100
     )

@@ -83,29 +83,53 @@ class CoinGameAssistant:
             logger.info("Gemini 분석기 초기화 중...")
             self.gemini_analyzer = GeminiAnalyzer(
                 api_key=config.GEMINI_API_KEY,
-                model_name=config.GEMINI_MODEL
+                model_name=config.GEMINI_MODEL,
+                max_calls_per_minute=config.MAX_API_CALLS_PER_MINUTE,
             )
+
+            # 3. 좌표 변환기 초기화 (화면(y-down) -> 물리(y-up))
+            self.coordinate_mapper = CoordinateMapper(
+                screen_width=self.game_width,
+                screen_height=self.game_height,
+                physics_width=self.game_width,
+                physics_height=self.game_height,
+                scale=config.PHYSICS_SCALE,
+            )
+
+            physics_params = {
+                'gravity': config.PHYSICS_GRAVITY,
+                'damping': config.PHYSICS_DAMPING,
+                'iterations': config.PHYSICS_ITERATIONS,
+                'coin_friction': config.COIN_FRICTION,
+                'coin_elasticity': config.COIN_ELASTICITY,
+                'wall_friction': config.WALL_FRICTION,
+                'wall_elasticity': config.WALL_ELASTICITY,
+            }
             
-            # 3. 물리 시뮬레이터 초기화
+            # 4. 물리 시뮬레이터 초기화
             logger.info("물리 시뮬레이터 초기화 중...")
             self.physics_simulator = PhysicsSimulator(
                 game_width=self.game_width,
                 game_height=self.game_height,
+                coordinate_mapper=self.coordinate_mapper,
                 time_step=config.SIMULATION_TIME_STEP,
-                simulation_duration=config.SIMULATION_DURATION
+                simulation_duration=config.SIMULATION_DURATION,
+                **physics_params,
             )
             
-            # 4. 위치 최적화기 초기화
+            # 5. 위치 최적화기 초기화
             logger.info("위치 최적화기 초기화 중...")
             self.position_optimizer = PositionOptimizer(
                 game_width=self.game_width,
                 game_height=self.game_height,
                 algorithm=config.SOLVER_ALGORITHM,
                 sample_step=config.SOLVER_SAMPLE_STEP,
-                lookahead_depth=config.SOLVER_LOOKAHEAD_DEPTH
+                lookahead_depth=config.SOLVER_LOOKAHEAD_DEPTH,
+                coordinate_mapper=self.coordinate_mapper,
+                physics_params=physics_params,
             )
             
-            # 5. 오버레이 윈도우 초기화
+            # 6. 오버레이 윈도우 초기화
             logger.info("오버레이 윈도우 초기화 중...")
             window_area = self.screen_capture.game_area
             self.overlay_window = OverlayWindow(
@@ -121,21 +145,12 @@ class CoinGameAssistant:
             )
             self.overlay_window.create_window()
             
-            # 6. 상태 감지기 초기화
+            # 7. 상태 감지기 초기화
             logger.info("상태 감지기 초기화 중...")
             self.state_detector = StateDetector(
                 check_frames=config.STABILITY_CHECK_FRAMES,
                 pixel_threshold=config.STABILITY_PIXEL_THRESHOLD,
                 wait_time=config.STABILITY_WAIT_TIME
-            )
-            
-            # 7. 좌표 변환기 초기화
-            self.coordinate_mapper = CoordinateMapper(
-                screen_width=self.game_width,
-                screen_height=self.game_height,
-                physics_width=self.game_width,
-                physics_height=self.game_height,
-                scale=config.PHYSICS_SCALE
             )
             
             logger.info("✅ 모든 컴포넌트 초기화 완료")
@@ -155,6 +170,10 @@ class CoinGameAssistant:
         
         try:
             while self.running:
+                if self.overlay_window and not self.overlay_window.is_open():
+                    logger.info("오버레이 창이 닫혔습니다. 메인 루프를 종료합니다.")
+                    break
+
                 # 1. 화면 캡처
                 screenshot = self.screen_capture.capture()
                 
@@ -169,7 +188,7 @@ class CoinGameAssistant:
                 if not self.state_detector.is_stable():
                     # 움직이는 중이면 대기
                     self.overlay_window.update()
-                    time.sleep(0.2)
+                    time.sleep(max(0.01, 1.0 / max(1, config.CAPTURE_FPS)))
                     continue
                 
                 logger.info("정지 상태 감지 - 분석 시작")
@@ -194,7 +213,7 @@ class CoinGameAssistant:
                 
                 # 4. 다음 동전이 없으면 기본값 사용
                 if not next_coin_type:
-                    next_coin_type = CoinType.COIN_10  # 기본값
+                    next_coin_type = CoinType.BLACK_THUNDER  # 기본값
                     logger.warning("다음 동전 정보 없음, 기본값 사용")
                 
                 # 5. 최적 위치 계산
@@ -208,16 +227,13 @@ class CoinGameAssistant:
                 
                 # 6. 오버레이 업데이트
                 self.overlay_window.update_guide(best_x, best_score)
-                
-                # 7. 다음 턴까지 대기
-                logger.info("다음 턴 대기 중...")
-                time.sleep(2)
-                
-                # 상태 감지기 리셋
+
+                # 7. 다음 턴 시작(움직임 발생)까지 대기
+                logger.info("다음 턴 시작(움직임 감지) 대기 중...")
+                self._wait_for_motion_start()
+
+                # 상태 감지기 리셋(다음 안정 상태 감지를 위해)
                 self.state_detector.reset()
-                
-                # UI 업데이트
-                self.overlay_window.update()
                 
         except KeyboardInterrupt:
             logger.info("사용자에 의해 중단됨")
@@ -225,6 +241,30 @@ class CoinGameAssistant:
             logger.error(f"메인 루프 오류: {e}", exc_info=True)
         finally:
             self.cleanup()
+
+    def _wait_for_motion_start(self, max_wait_s: float = 30.0):
+        """추천 후 사용자가 드롭해서 화면이 다시 '움직이기 시작'할 때까지 대기."""
+        if not self.screen_capture or not self.state_detector or not self.overlay_window:
+            return
+
+        start = time.time()
+        sleep_s = max(0.01, 1.0 / max(1, config.CAPTURE_FPS))
+
+        while time.time() - start < max_wait_s:
+            if not self.overlay_window.is_open():
+                return
+
+            frame = self.screen_capture.capture()
+            if frame is None:
+                time.sleep(sleep_s)
+                continue
+
+            self.state_detector.add_frame(frame)
+            if not self.state_detector.is_stable():
+                return
+
+            self.overlay_window.update()
+            time.sleep(sleep_s)
     
     def cleanup(self):
         """리소스 정리"""
