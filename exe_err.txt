@@ -1,0 +1,18 @@
+PyInstaller\loader\pyimod02_importers.py:450: FutureWarning: 
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving 
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+2026-02-13 02:16:55,490 - __main__ - INFO - === LLM-Only 동전게임 가이드 시작 ===
+2026-02-13 02:16:55,491 - __main__ - INFO - 화면 캡처 초기화 중...
+2026-02-13 02:16:55,491 - vision.screen_capture - INFO - ScreenCapture 초기화: 창 패턴 = 'MuMuPlayer'
+2026-02-13 02:16:55,497 - vision.screen_capture - INFO - 창 발견: 'Android Device' at (1034, 8) size=553x1013
+2026-02-13 02:16:55,498 - vision.screen_capture - INFO - 클라이언트 영역: (1038,8) 545x1009
+2026-02-13 02:16:55,498 - __main__ - INFO - 게임 영역: 545x1009
+2026-02-13 02:16:55,499 - __main__ - INFO - LLM 어드바이저 초기화 중...
+2026-02-13 02:16:57,060 - solver.llm_advisor - INFO - LLMAdvisor 초기화: model=gemini-3-flash-preview
+2026-02-13 02:16:57,069 - __main__ - INFO - 오버레이 윈도우 초기화 중...
+2026-02-13 02:16:57,069 - ui.overlay - INFO - OverlayWindow init: 545x1009 at (1038,8)

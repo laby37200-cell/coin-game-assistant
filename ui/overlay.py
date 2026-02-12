@@ -22,13 +22,15 @@ _TRANSPARENT_KEY = '#010101'
 
 class GuideInfo:
     """하나의 가이드 라인 정보"""
-    __slots__ = ('x', 'score', 'confidence', 'rank')
+    __slots__ = ('x', 'score', 'confidence', 'rank', 'desc')
 
-    def __init__(self, x: float, score: float, confidence: float, rank: int):
+    def __init__(self, x: float, score: float, confidence: float, rank: int,
+                 desc: str = ''):
         self.x = x
         self.score = score
         self.confidence = confidence  # 0.0 ~ 1.0
         self.rank = rank              # 0 = best
+        self.desc = desc              # 간략한 설명
 
 
 def confidence_color(confidence: float) -> str:
@@ -80,8 +82,8 @@ class OverlayWindow:
         self.root = None
         self.canvas = None
 
-        # 스레드 안전 큐 — 백그라운드 스레드에서 UI 업데이트 요청
-        self._queue = queue.Queue()
+        # 스레드 안전 큐 — 백그라운드 스레드에서 UI 업데이트 요청 (크기 제한)
+        self._queue = queue.Queue(maxsize=200)
 
         # 현재 표시 상태
         self._guides: List[GuideInfo] = []
@@ -97,14 +99,15 @@ class OverlayWindow:
         self._floor_y = float(window_height)
         self._bounds_visible = True
 
-        # 화살표 키 조정
-        self._adjust_target = 0  # 0=wall_left, 1=wall_right, 2=ceiling, 3=floor
-        self._adjust_names = ['Wall-L', 'Wall-R', 'Ceiling', 'Floor']
-        self._adjust_step = 3  # pixels per keypress
+        # 콜백
         self._bounds_callback = None  # callable(wall_l, wall_r, ceil, floor)
         self._analyze_callback = None   # callable() — 수동 분석 트리거
-        self._auto_mode = False          # 기본: 수동 분석
-        self._bounds_editing = False     # 경계 편집 모드 (Ctrl+Enter로 토글)
+        self._chat_callback = None      # callable(msg) → str — LLM 대화
+        self._auto_touch_callback = None  # callable() — 자동 터치 모드 토글
+        self._control_panel = None       # 컨트롤 패널 참조
+        self._hwnd = None               # 오버레이 HWND
+
+        self._bounds_editing = False  # 하위 호환
 
         logger.info(f"OverlayWindow init: {window_width}x{window_height} at ({window_x},{window_y})")
 
@@ -129,11 +132,11 @@ class OverlayWindow:
 
         # Windows: 클릭 투과 — 투명 영역은 클릭이 게임으로 전달됨
         try:
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+            self._hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            style = ctypes.windll.user32.GetWindowLongW(self._hwnd, -20)  # GWL_EXSTYLE
             # WS_EX_LAYERED 만 설정 (WS_EX_TRANSPARENT 는 렌더링 문제 유발 가능)
             style |= 0x80000  # WS_EX_LAYERED
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, style)
+            ctypes.windll.user32.SetWindowLongW(self._hwnd, -20, style)
         except Exception:
             logger.warning("레이어드 윈도우 설정 실패")
 
@@ -152,29 +155,11 @@ class OverlayWindow:
         self.root.bind('<Escape>', lambda e: self.close())
         self.root.bind('<Control-q>', lambda e: self.close())
 
-        # 화살표 키로 벽/천장 조정 (편집모드일 때만 동작)
-        self.root.bind('<Left>', lambda e: self._adjust_horizontal(-self._adjust_step))
-        self.root.bind('<Right>', lambda e: self._adjust_horizontal(self._adjust_step))
-        self.root.bind('<Up>', lambda e: self._adjust_vertical(-self._adjust_step))
-        self.root.bind('<Down>', lambda e: self._adjust_vertical(self._adjust_step))
-        # Tab = 수동 분석 (break로 포커스 이동 방지)
-        self.root.bind('<Tab>', self._on_tab)
-        # Ctrl+Tab = 자동/수동 모드 토글
-        self.root.bind('<Control-Tab>', lambda e: self._toggle_auto_mode())
-        # Enter = 편집모드에서 다음 선으로 이동
-        self.root.bind('<Return>', lambda e: self._next_bound())
-        # Ctrl+Enter = 경계 편집 모드 토글 (저장+잠금)
-        self.root.bind('<Control-Return>', lambda e: self._toggle_editing())
         self.root.bind('b', lambda e: self._toggle_bounds())
-        # Shift+Arrow = 큰 조정 (10px)
-        self.root.bind('<Shift-Left>', lambda e: self._adjust_horizontal(-10))
-        self.root.bind('<Shift-Right>', lambda e: self._adjust_horizontal(10))
-        self.root.bind('<Shift-Up>', lambda e: self._adjust_vertical(-10))
-        self.root.bind('<Shift-Down>', lambda e: self._adjust_vertical(10))
 
-        # 포커스 강제 설정 (overrideredirect 윈도우는 포커스를 잃기 쉬움)
-        self.root.focus_force()
-        self.canvas.focus_set()
+        # 컨트롤 패널 생성 (버튼 UI)
+        from ui.control_panel import ControlPanel
+        self._control_panel = ControlPanel(self.root, self)
 
         # 큐 폴링 시작 (50ms 간격)
         self._polling = True
@@ -207,15 +192,19 @@ class OverlayWindow:
                     self._ceiling_y = cy
                     self._floor_y = fy
                     self._redraw()
+                    # 컨트롤 패널 입력 필드 동기화
+                    if self._control_panel:
+                        self._control_panel.update_bounds_display(wl, wr, cy, fy)
+                elif msg_type == '_analysis_result':
+                    result, elapsed = data
+                    if self._control_panel:
+                        self._control_panel.add_analysis_result(result, elapsed)
         except Exception:
             pass
         if self.root and self._polling:
             try:
-                # 포커스 유지 (overrideredirect 윈도우는 포커스를 잃기 쉬움)
-                if self.root.focus_get() is None:
-                    self.root.focus_force()
                 self._after_id = self.root.after(50, self._poll_queue)
-            except tk.TclError:
+            except (tk.TclError, RuntimeError):
                 pass
 
     # ------------------------------------------------------------------ #
@@ -225,31 +214,38 @@ class OverlayWindow:
         """단일 가이드 업데이트 (하위 호환)"""
         self.update_guides([GuideInfo(x=guide_x, score=score, confidence=1.0, rank=0)])
 
+    def _safe_put(self, msg):
+        """큐에 비차단 삽입 — 큐가 가득 차면 드롭"""
+        try:
+            self._queue.put_nowait(msg)
+        except queue.Full:
+            pass  # 오래된 메시지 드롭 (UI 지연보다 안정성 우선)
+
     def update_guides(self, guides: List[GuideInfo]):
         """여러 가이드 라인 업데이트 (스레드 안전)"""
-        self._queue.put((self._MSG_GUIDES, guides))
+        self._safe_put((self._MSG_GUIDES, guides))
 
     def update_status(self, text: str):
         """상태 텍스트 업데이트 (스레드 안전)"""
-        self._queue.put((self._MSG_STATUS, text))
+        self._safe_put((self._MSG_STATUS, text))
 
     def update_progress(self, progress: float):
         """진행도 업데이트 0.0~1.0 (스레드 안전)"""
-        self._queue.put((self._MSG_PROGRESS, max(0.0, min(1.0, progress))))
+        self._safe_put((self._MSG_PROGRESS, max(0.0, min(1.0, progress))))
 
     def show_message(self, message: str, duration: int = 3000):
         """일시적 메시지 표시 (스레드 안전)"""
-        self._queue.put((self._MSG_MESSAGE, (message, duration)))
+        self._safe_put((self._MSG_MESSAGE, (message, duration)))
 
     def clear_guide(self):
         """가이드 제거"""
         self._guides = []
-        self._queue.put((self._MSG_GUIDES, []))
+        self._safe_put((self._MSG_GUIDES, []))
 
     def update_bounds(self, wall_left: float, wall_right: float,
                       ceiling_y: float, floor_y: float):
         """벽/천장/바닥 경계 업데이트 (스레드 안전)"""
-        self._queue.put((self._MSG_BOUNDS, (wall_left, wall_right, ceiling_y, floor_y)))
+        self._safe_put((self._MSG_BOUNDS, (wall_left, wall_right, ceiling_y, floor_y)))
 
     def set_bounds_callback(self, callback):
         """경계 조정 시 호출될 콜백 설정: callback(wall_l, wall_r, ceil, floor)"""
@@ -259,38 +255,22 @@ class OverlayWindow:
         """수동 분석 트리거 콜백 설정: callback()"""
         self._analyze_callback = callback
 
+    def set_chat_callback(self, callback):
+        """LLM 대화 콜백 설정: callback(user_msg) → str"""
+        self._chat_callback = callback
+
+    def set_auto_touch_callback(self, callback):
+        """자동 터치 모드 토글 콜백 설정: callback()"""
+        self._auto_touch_callback = callback
+
+    def add_analysis_result(self, result: dict, elapsed: float = 0.0):
+        """분석 결과를 분석 로그 창에 전달 (스레드 안전)"""
+        if self._control_panel:
+            self._safe_put(('_analysis_result', (result, elapsed)))
+
     @property
     def auto_mode(self) -> bool:
-        return self._auto_mode
-
-    # ------------------------------------------------------------------ #
-    # Keyboard boundary adjustment (메인 스레드)
-    # ------------------------------------------------------------------ #
-    def _adjust_horizontal(self, delta: int):
-        """Left/Right 키 — 편집모드 + 벽 선택 시에만 이동"""
-        if not self._bounds_editing:
-            return
-        t = self._adjust_target
-        if t == 0:
-            self._wall_left = max(0, self._wall_left + delta)
-        elif t == 1:
-            self._wall_right = min(self.window_width, self._wall_right + delta)
-        else:
-            return
-        self._redraw()
-
-    def _adjust_vertical(self, delta: int):
-        """Up/Down 키 — 편집모드 + 천장/바닥 선택 시에만 이동"""
-        if not self._bounds_editing:
-            return
-        t = self._adjust_target
-        if t == 2:
-            self._ceiling_y = max(0, self._ceiling_y + delta)
-        elif t == 3:
-            self._floor_y = min(self.window_height, self._floor_y + delta)
-        else:
-            return
-        self._redraw()
+        return False
 
     def _notify_bounds(self):
         """콜백으로 main에 경계값 변경 알림 (저장 포함)"""
@@ -298,41 +278,6 @@ class OverlayWindow:
             self._bounds_callback(
                 self._wall_left, self._wall_right,
                 self._ceiling_y, self._floor_y)
-
-    def _next_bound(self):
-        """Enter 키 — 편집모드에서 다음 선으로 이동 (값은 그대로 유지)"""
-        if not self._bounds_editing:
-            return
-        self._adjust_target = (self._adjust_target + 1) % 4
-        name = self._adjust_names[self._adjust_target]
-        logger.info(f"Next bound: {name}")
-        self._redraw()
-
-    def _toggle_editing(self):
-        """Ctrl+Enter — 경계 편집 모드 토글. 나갈 때 저장."""
-        self._bounds_editing = not self._bounds_editing
-        if self._bounds_editing:
-            self._adjust_target = 0
-            logger.info("경계 편집 모드 진입")
-        else:
-            # 편집 종료 → 저장
-            self._notify_bounds()
-            logger.info("경계 편집 모드 종료 — 저장 완료")
-        self._redraw()
-
-    def _on_tab(self, event):
-        """Tab 키 — 수동 분석 트리거 (break로 포커스 이동 방지)"""
-        if self._analyze_callback:
-            self._analyze_callback()
-            logger.info("수동 분석 트리거")
-        return 'break'
-
-    def _toggle_auto_mode(self):
-        """Ctrl+Tab — 자동/수동 분석 모드 토글"""
-        self._auto_mode = not self._auto_mode
-        mode = "자동" if self._auto_mode else "수동"
-        logger.info(f"분석 모드: {mode}")
-        self._redraw()
 
     def _toggle_bounds(self):
         """'b' 키로 경계선 표시/숨기기 토글"""
@@ -361,79 +306,33 @@ class OverlayWindow:
         if not self.canvas or not self._bounds_visible:
             return
 
-        editing = self._bounds_editing
-        t = self._adjust_target
-
-        # 색상: 편집모드 + 선택된 것만 밝게, 나머지는 어둡게
-        def col(idx, base):
-            if not editing:
-                return '#444444'  # 잠금 상태 — 모두 어둡게
-            return base if idx == t else '#555555'
-
-        # 편집모드일 때 선택된 선은 굵게
-        def lw(idx):
-            return 3 if (editing and idx == t) else 2
-
         wl = self._wall_left
         wr = self._wall_right
         cy = self._ceiling_y
         fy = self._floor_y
 
-        # 왼쪽 벽
-        self.canvas.create_line(
-            wl, 0, wl, self.window_height,
-            fill=col(0, '#00CCFF'), width=lw(0), dash=(4, 4))
-        self.canvas.create_text(
-            wl + 3, 15, text=f'L:{wl:.0f}', fill=col(0, '#00CCFF'),
-            font=('Consolas', 8), anchor='w')
+        line_defs = [
+            (True,  wl, '#00AAAA', f'L:{wl:.0f}'),
+            (True,  wr, '#00AAAA', f'R:{wr:.0f}'),
+            (False, cy, '#FF4444', f'Ceil:{cy:.0f}'),
+            (False, fy, '#44AA44', f'Floor:{fy:.0f}'),
+        ]
 
-        # 오른쪽 벽
-        self.canvas.create_line(
-            wr, 0, wr, self.window_height,
-            fill=col(1, '#00CCFF'), width=lw(1), dash=(4, 4))
-        self.canvas.create_text(
-            wr - 3, 15, text=f'R:{wr:.0f}', fill=col(1, '#00CCFF'),
-            font=('Consolas', 8), anchor='e')
-
-        # 천장 (게임오버 라인)
-        self.canvas.create_line(
-            0, cy, self.window_width, cy,
-            fill=col(2, '#FF4444'), width=lw(2), dash=(6, 3))
-        self.canvas.create_text(
-            self.window_width - 5, cy + 10, text=f'Ceil:{cy:.0f}',
-            fill=col(2, '#FF4444'), font=('Consolas', 8), anchor='e')
-
-        # 바닥
-        self.canvas.create_line(
-            0, fy, self.window_width, fy,
-            fill=col(3, '#44FF44'), width=lw(3), dash=(6, 3))
-        self.canvas.create_text(
-            self.window_width - 5, fy - 10, text=f'Floor:{fy:.0f}',
-            fill=col(3, '#44FF44'), font=('Consolas', 8), anchor='e')
-
-        # 상단 안내 텍스트
-        mode_str = '자동' if self._auto_mode else '수동'
-        mode_col = '#00FF00' if self._auto_mode else '#FFAA00'
-
-        if editing:
-            name = self._adjust_names[t]
-            if t in (0, 1):
-                hint = f'[←→] ±{self._adjust_step}px  |  [Shift] ±10px'
+        for is_vert, pos, color, label in line_defs:
+            if is_vert:
+                self.canvas.create_line(
+                    pos, 0, pos, self.window_height,
+                    fill=color, width=1, dash=(4, 8))
+                self.canvas.create_text(
+                    pos + 3, 15, text=label, fill=color,
+                    font=('Consolas', 7), anchor='w')
             else:
-                hint = f'[↑↓] ±{self._adjust_step}px  |  [Shift] ±10px'
-            self.canvas.create_text(
-                self.window_width / 2, 5,
-                text=f'✏ 편집: {name}  |  {hint}  |  [Enter] 다음선  |  [Ctrl+Enter] 저장+잠금',
-                fill='#FF8800', font=('Consolas', 9, 'bold'), anchor='n')
-        else:
-            self.canvas.create_text(
-                self.window_width / 2, 5,
-                text=f'🔒 경계 잠금  |  [Ctrl+Enter] 편집  |  [b] 숨기기',
-                fill='#888888', font=('Consolas', 9, 'bold'), anchor='n')
-        self.canvas.create_text(
-            self.window_width / 2, 20,
-            text=f'[Tab] 분석  |  [Ctrl+Tab] 모드: {mode_str}',
-            fill=mode_col, font=('Consolas', 9, 'bold'), anchor='n')
+                self.canvas.create_line(
+                    0, pos, self.window_width, pos,
+                    fill=color, width=1, dash=(4, 8))
+                self.canvas.create_text(
+                    self.window_width - 5, pos - 8, text=label,
+                    fill=color, font=('Consolas', 7), anchor='e')
 
     def _draw_guide_lines(self):
         """현재 저장된 가이드 라인들을 캔버스에 그리기"""
@@ -444,57 +343,77 @@ class OverlayWindow:
             color = confidence_color(g.confidence)
             width = self.line_width + (2 if g.rank == 0 else 0)
 
-            # 캔버스 범위 내로 클램핑
-            gx = max(5, min(g.x, self.window_width - 5))
+            # 경계선 범위 내로 클램핑
+            wl = self._wall_left
+            wr = self._wall_right
+            cy = self._ceiling_y
+            fy = self._floor_y
+            gx = max(wl + 5, min(g.x, wr - 5))
+            top_y = max(0, cy - 30)
 
-            # 수직 가이드 라인
+            # 수직 가이드 라인 (천장~바닥)
             self.canvas.create_line(
-                gx, 80, gx, self.window_height - 20,
+                gx, top_y, gx, fy,
                 fill=color, width=width, dash=(6, 3) if g.rank > 0 else ()
             )
 
             # 라인 상단에 삼각형 마커
             self.canvas.create_polygon(
-                gx - 8, 80, gx + 8, 80, gx, 95,
+                gx - 8, top_y, gx + 8, top_y, gx, top_y + 15,
                 fill=color, outline=color
             )
 
-            # 확률 텍스트
+            # 확률 텍스트 + 간략 설명
             pct = int(g.confidence * 100)
-            label = f"{pct}%"
+            # 설명이 있으면 사용, 없으면 신뢰도 기반 자동 생성
+            if g.desc:
+                desc = g.desc
+            elif pct >= 90:
+                desc = "최적"
+            elif pct >= 75:
+                desc = "좋음"
+            elif pct >= 60:
+                desc = "보통"
+            elif pct >= 40:
+                desc = "주의"
+            else:
+                desc = "위험"
+            label = f"{pct}% {desc}"
             tx = gx
-            if tx < 40:
-                tx = 40
-            elif tx > self.window_width - 40:
-                tx = self.window_width - 40
+            if tx < 60:
+                tx = 60
+            elif tx > self.window_width - 60:
+                tx = self.window_width - 60
 
             self.canvas.create_text(
-                tx, 70,
+                tx, max(10, top_y - 10),
                 text=label,
                 fill=color,
-                font=('Consolas', 11, 'bold'),
+                font=('맑은 고딕', 10, 'bold'),
             )
 
         # 최고 가이드 정보 텍스트
         best = self._guides[0] if self._guides else None
         if best:
-            info = f"DROP HERE  (score: {best.score:.0f})"
+            best_desc = best.desc if best.desc else "DROP HERE"
+            info = f"{best_desc}  (x={best.x:.0f})"
             tx = max(5, min(best.x, self.window_width - 5))
-            if tx < 80:
-                tx = 80
-            elif tx > self.window_width - 80:
-                tx = self.window_width - 80
+            if tx < 90:
+                tx = 90
+            elif tx > self.window_width - 90:
+                tx = self.window_width - 90
 
             # 텍스트 배경 박스
+            box_w = max(80, len(info) * 7)
             self.canvas.create_rectangle(
-                tx - 75, 38, tx + 75, 60,
+                tx - box_w // 2, 38, tx + box_w // 2, 60,
                 fill='#222222', outline=confidence_color(best.confidence), width=1
             )
             self.canvas.create_text(
                 tx, 49,
                 text=info,
                 fill='#FFFFFF',
-                font=('Consolas', 10, 'bold'),
+                font=('맑은 고딕', 9, 'bold'),
             )
 
     def _draw_status_bar(self):
@@ -545,19 +464,23 @@ class OverlayWindow:
         if not self.canvas:
             return
 
-        # 반투명 배경 박스
+        # 반투명 배경 박스 (한글 2~3줄에 맞게 크기 조정)
         cx = self.window_width / 2
         cy = self.window_height / 2
+        lines = message.count('\n') + 1
+        box_h = max(40, 20 + lines * 18)
+        box_w = min(self.window_width - 20, max(200, len(message) * 6))
         box = self.canvas.create_rectangle(
-            cx - 140, cy - 30, cx + 140, cy + 30,
+            cx - box_w // 2, cy - box_h, cx + box_w // 2, cy + box_h,
             fill='#222222', outline='#555555', width=1
         )
         msg_id = self.canvas.create_text(
             cx, cy,
             text=message,
             fill='#FFFFFF',
-            font=('Consolas', 13, 'bold'),
-            justify='center'
+            font=('맑은 고딕', 11, 'bold'),
+            justify='center',
+            width=box_w - 20,
         )
 
         def remove():
@@ -588,6 +511,9 @@ class OverlayWindow:
 
     def close(self):
         self._polling = False
+        if self._control_panel:
+            self._control_panel.destroy()
+            self._control_panel = None
         if self.root:
             try:
                 if self._after_id is not None:

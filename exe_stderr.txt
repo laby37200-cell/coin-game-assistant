@@ -1,0 +1,20 @@
+PyInstaller\loader\pyimod02_importers.py:450: FutureWarning: 
+
+All support for the `google.generativeai` package has ended. It will no longer be receiving 
+updates or bug fixes. Please switch to the `google.genai` package as soon as possible.
+See README for more details:
+
+https://github.com/google-gemini/deprecated-generative-ai-python/blob/main/README.md
+
+2026-02-12 22:14:38,431 - __main__ - INFO - === LLM-Only 동전게임 가이드 시작 ===
+2026-02-12 22:14:38,441 - __main__ - INFO - 화면 캡처 초기화 중...
+2026-02-12 22:14:38,442 - vision.screen_capture - INFO - ScreenCapture 초기화: 창 패턴 = 'MuMuPlayer'
+2026-02-12 22:14:38,449 - vision.screen_capture - INFO - 창 발견: 'Android Device' at (1048, 14) size=553x1013
+2026-02-12 22:14:38,450 - vision.screen_capture - INFO - 클라이언트 영역: (1052,14) 545x1009
+2026-02-12 22:14:38,450 - __main__ - INFO - 게임 영역: 545x1009
+2026-02-12 22:14:38,450 - __main__ - INFO - LLM 어드바이저 초기화 중...
+2026-02-12 22:14:38,450 - __main__ - ERROR - 초기화 실패: google-genai SDK가 필요합니다. pip install google-genai
+Traceback (most recent call last):
+  File "main_llm.py", line 92, in initialize
+  File "solver\llm_advisor.py", line 313, in __init__
+ImportError: google-genai SDK가 필요합니다. pip install google-genai

@@ -44,12 +44,15 @@ class StateDetector:
     
     def add_frame(self, frame: np.ndarray):
         """
-        새 프레임 추가
+        새 프레임 추가 (메모리 절약을 위해 축소 저장)
         
         Args:
             frame: 캡처된 프레임 (numpy array)
         """
-        self.recent_frames.append(frame)
+        # 메모리 절약: 4배 축소하여 저장 (545x1009 → ~136x252)
+        h, w = frame.shape[:2]
+        small = frame[::4, ::4]
+        self.recent_frames.append(small)
     
     def is_stable(self) -> bool:
         """
@@ -95,8 +98,8 @@ class StateDetector:
         if frame1.shape != frame2.shape:
             return float('inf')
         
-        # 절대 차이 계산
-        diff = np.abs(frame1.astype(float) - frame2.astype(float))
+        # 절대 차이 계산 (int16으로 메모리 절약)
+        diff = np.abs(frame1.astype(np.int16) - frame2.astype(np.int16))
         
         # 차이가 있는 픽셀 수 계산 (임계값 10)
         diff_pixels = np.sum(diff > 10)

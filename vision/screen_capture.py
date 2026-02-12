@@ -4,6 +4,7 @@
 MuMu Player 창을 찾아서 게임 화면을 실시간으로 캡처합니다.
 """
 
+import os
 import time
 import numpy as np
 from PIL import Image
@@ -46,6 +47,11 @@ class ScreenCapture:
         self.game_area = None  # (x, y, width, height)
         self.last_screenshot = None
         self.last_capture_time = 0
+
+        # ADB 터치용
+        self._adb_exe = None
+        self._adb_device = None
+        self._android_size = None
         
         logger.info(f"ScreenCapture 초기화: 창 패턴 = '{window_title_pattern}'")
     
@@ -293,6 +299,126 @@ class ScreenCapture:
             logger.error(f"스크린샷 저장 실패: {e}")
             return False
     
+    # ── ADB 터치 ──
+    _ADB_PATHS = [
+        r"D:\Program Files\Netease\MuMuPlayerGlobal-12.0\shell\adb.exe",
+        r"D:\Program Files\Netease\MuMuPlayerGlobal-12.0\nx_main\adb.exe",
+        r"C:\Program Files\Netease\MuMuPlayerGlobal-12.0\shell\adb.exe",
+        r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
+    ]
+    def _init_adb(self) -> bool:
+        """ADB 경로 탐색 및 디바이스 연결"""
+        if self._adb_exe and self._adb_device:
+            return True
+
+        import subprocess, shutil
+
+        # ADB 실행파일 찾기
+        adb = shutil.which("adb")
+        if not adb:
+            for p in self._ADB_PATHS:
+                if os.path.isfile(p):
+                    adb = p
+                    break
+        if not adb:
+            logger.error("ADB를 찾을 수 없습니다")
+            return False
+
+        self._adb_exe = adb
+
+        # MuMu 기본 포트로 연결 시도
+        for port in (16384, 7555, 5555):
+            try:
+                subprocess.run(
+                    [adb, "connect", f"127.0.0.1:{port}"],
+                    capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+        # 디바이스 목록
+        try:
+            r = subprocess.run(
+                [adb, "devices"], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.strip().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] in ("device", "online"):
+                    self._adb_device = parts[0]
+                    break
+        except Exception as e:
+            logger.error(f"ADB devices 실패: {e}")
+            return False
+
+        if not self._adb_device:
+            logger.error("연결된 ADB 디바이스 없음")
+            return False
+
+        # Android 해상도
+        try:
+            r = subprocess.run(
+                [adb, "-s", self._adb_device, "shell", "wm", "size"],
+                capture_output=True, text=True, timeout=5)
+            # "Physical size: 720x1280"
+            for line in r.stdout.strip().splitlines():
+                if "size" in line.lower():
+                    sz = line.split(":")[-1].strip()
+                    w, h = sz.split("x")
+                    self._android_size = (int(w), int(h))
+                    break
+        except Exception as e:
+            logger.warning(f"Android 해상도 확인 실패: {e}")
+            self._android_size = (720, 1280)  # MuMu 기본값
+
+        logger.info(f"ADB 초기화: {adb} → {self._adb_device}, "
+                    f"Android={self._android_size}")
+        return True
+
+    def click_at(self, game_x: int, game_y: int, duration_ms: int = 50) -> bool:
+        """ADB를 통해 게임 좌표에 터치 이벤트 전송
+
+        Args:
+            game_x: 게임 영역 내 x 좌표 (0 ~ width)
+            game_y: 게임 영역 내 y 좌표 (0 ~ height)
+            duration_ms: 미사용 (ADB tap은 즉시)
+
+        Returns:
+            성공 여부
+        """
+        if not self._init_adb():
+            return False
+
+        if not self.game_area or not self._android_size:
+            return False
+
+        import subprocess
+
+        # 게임 윈도우 좌표 → Android 좌표 매핑
+        gw = max(1, self.game_area['width'])
+        gh = max(1, self.game_area['height'])
+        aw, ah = self._android_size
+
+        android_x = int(game_x * aw / gw)
+        android_y = int(game_y * ah / gh)
+
+        # 범위 클램핑
+        android_x = max(0, min(aw - 1, android_x))
+        android_y = max(0, min(ah - 1, android_y))
+
+        try:
+            r = subprocess.run(
+                [self._adb_exe, "-s", self._adb_device,
+                 "shell", "input", "tap", str(android_x), str(android_y)],
+                capture_output=True, text=True, timeout=10)
+            if r.returncode == 0:
+                logger.info(f"ADB tap: game({game_x},{game_y}) → "
+                            f"android({android_x},{android_y})")
+                return True
+            else:
+                logger.error(f"ADB tap 실패: {r.stderr}")
+                return False
+        except Exception as e:
+            logger.error(f"ADB tap 오류: {e}")
+            return False
+
     def get_game_dimensions(self) -> Optional[Tuple[int, int]]:
         """
         게임 영역 크기 반환
