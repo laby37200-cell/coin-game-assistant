@@ -62,7 +62,9 @@ class PositionOptimizer:
         self,
         current_coins: List[Coin],
         drop_coin_type: CoinType,
-        next_coin_type: Optional[CoinType] = None
+        next_coin_type: Optional[CoinType] = None,
+        wall_left_x: Optional[float] = None,
+        wall_right_x: Optional[float] = None
     ) -> Tuple[float, float, dict]:
         """
         최적의 낙하 위치 찾기
@@ -71,74 +73,115 @@ class PositionOptimizer:
             current_coins: 현재 게임 상태의 동전 리스트
             drop_coin_type: 떨어뜨릴 동전 종류
             next_coin_type: 다음에 올 동전 종류 (lookahead용)
+            wall_left_x: 왼쪽 벽 안쪽 x좌표 (드롭 가능 영역 왼쪽 경계)
+            wall_right_x: 오른쪽 벽 안쪽 x좌표 (드롭 가능 영역 오른쪽 경계)
             
         Returns:
             (최적 x 좌표, 예상 점수, 상세 정보)
         """
         if self.algorithm == "greedy":
-            return self._greedy_search(current_coins, drop_coin_type, next_coin_type)
+            return self._greedy_search(current_coins, drop_coin_type, next_coin_type, wall_left_x, wall_right_x)
         elif self.algorithm == "monte_carlo":
-            return self._monte_carlo_search(current_coins, drop_coin_type, next_coin_type)
+            return self._monte_carlo_search(current_coins, drop_coin_type, next_coin_type, wall_left_x, wall_right_x)
         else:
             logger.warning(f"알 수 없는 알고리즘: {self.algorithm}, greedy 사용")
-            return self._greedy_search(current_coins, drop_coin_type, next_coin_type)
+            return self._greedy_search(current_coins, drop_coin_type, next_coin_type, wall_left_x, wall_right_x)
     
+    # 2단계 lookahead에서 상위 후보 수
+    TOP_K_CANDIDATES = 5
+    # 2단계에서 다음 동전 샘플링 간격 (더 넓게)
+    LOOKAHEAD_SAMPLE_STEP = 30
+
     def _greedy_search(
         self,
         current_coins: List[Coin],
         drop_coin_type: CoinType,
-        next_coin_type: Optional[CoinType] = None
+        next_coin_type: Optional[CoinType] = None,
+        wall_left_x: Optional[float] = None,
+        wall_right_x: Optional[float] = None
     ) -> Tuple[float, float, dict]:
         """
-        Greedy Search: 모든 가능한 위치를 시뮬레이션하여 최고 점수 선택
+        2-Phase Deep Search (오목 AI식 탐색):
+          Phase 1: 모든 위치를 시뮬레이션하여 상위 K개 후보 선정
+          Phase 2: 각 후보에 대해 다음 동전까지 시뮬레이션 (lookahead)
         
         Args:
             current_coins: 현재 게임 상태
             drop_coin_type: 떨어뜨릴 동전
-            next_coin_type: 다음 동전 (사용 안 함)
+            next_coin_type: 다음 동전 (lookahead용)
             
         Returns:
             (최적 x, 점수, 상세 정보)
         """
-        # 샘플링할 x 좌표 생성
-        x_positions = self._generate_sample_positions(drop_coin_type)
+        # Phase 1: 전체 위치 스캔
+        x_positions = self._generate_sample_positions(drop_coin_type, wall_left_x, wall_right_x)
         
         if not x_positions:
             logger.warning("샘플링 가능한 위치가 없습니다.")
-            return self.game_width / 2, 0.0, {}
+            center = ((wall_left_x or 0) + (wall_right_x or self.game_width)) / 2
+            return center, 0.0, {}
         
-        best_x = x_positions[0]
-        best_score = float('-inf')
-        best_coins = []
-        
-        # 모든 위치 시뮬레이션
+        # Phase 1 결과 수집
+        candidates = []
         for x in x_positions:
-            # 물리 시뮬레이션
             final_coins, sim_score = self.simulator.simulate_drop(
-                current_coins,
-                drop_coin_type,
-                x
+                current_coins, drop_coin_type, x
             )
-            
-            # 전략 평가
             strategy_score = self.evaluator.evaluate(final_coins)
-            score = sim_score + strategy_score
-            
-            # 최고 점수 업데이트
-            if score > best_score:
-                best_score = score
-                best_x = x
-                best_coins = final_coins
+            total = sim_score + strategy_score
+            candidates.append((x, total, final_coins, sim_score))
         
-        # 상세 정보
+        # 상위 K개 후보 선정
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        top_k = candidates[:self.TOP_K_CANDIDATES]
+        
+        # Phase 2: Lookahead (다음 동전까지 시뮬레이션)
+        best_x = top_k[0][0]
+        best_score = top_k[0][1]
+        best_coins = top_k[0][2]
+        
+        if next_coin_type and self.lookahead_depth >= 2:
+            lookahead_positions = self._generate_sample_positions(
+                next_coin_type, wall_left_x, wall_right_x
+            )
+            # lookahead는 더 넓은 간격으로 샘플링
+            lookahead_positions = lookahead_positions[::max(1, self.LOOKAHEAD_SAMPLE_STEP // max(1, self.sample_step))]
+            
+            for x1, score1, coins_after_drop1, sim1 in top_k:
+                # 각 후보에 대해 다음 동전의 최선 위치 탐색
+                best_next_score = float('-inf')
+                
+                for x2 in lookahead_positions:
+                    final2, sim2 = self.simulator.simulate_drop(
+                        coins_after_drop1, next_coin_type, x2
+                    )
+                    strat2 = self.evaluator.evaluate(final2)
+                    next_score = sim2 + strat2
+                    if next_score > best_next_score:
+                        best_next_score = next_score
+                
+                # 현재 수 + 다음 수의 최선 결과를 합산
+                combined = score1 * 0.6 + best_next_score * 0.4
+                
+                if combined > best_score:
+                    best_score = combined
+                    best_x = x1
+                    best_coins = coins_after_drop1
+            
+            logger.info(f"Deep Search (2-step): 최적 x={best_x:.1f}, "
+                       f"combined={best_score:.1f}, "
+                       f"candidates={len(top_k)}, lookahead_pos={len(lookahead_positions)}")
+        else:
+            logger.info(f"Greedy Search: 최적 x={best_x:.1f}, 점수={best_score:.1f}")
+        
         details = {
             'positions_tested': len(x_positions),
+            'lookahead_depth': 2 if (next_coin_type and self.lookahead_depth >= 2) else 1,
+            'top_k_candidates': len(top_k),
             'best_position': best_x,
             'best_score': best_score,
             'evaluation_details': self.evaluator.get_evaluation_details(best_coins)
         }
-        
-        logger.info(f"Greedy Search 완료: 최적 x={best_x:.1f}, 점수={best_score:.1f}")
         
         return best_x, best_score, details
     
@@ -146,7 +189,9 @@ class PositionOptimizer:
         self,
         current_coins: List[Coin],
         drop_coin_type: CoinType,
-        next_coin_type: Optional[CoinType] = None
+        next_coin_type: Optional[CoinType] = None,
+        wall_left_x: Optional[float] = None,
+        wall_right_x: Optional[float] = None
     ) -> Tuple[float, float, dict]:
         """
         Monte Carlo Search: 랜덤 샘플링 + 평균 점수 기반
@@ -161,23 +206,34 @@ class PositionOptimizer:
             (최적 x, 점수, 상세 정보)
         """
         # 현재는 Greedy와 동일
-        return self._greedy_search(current_coins, drop_coin_type, next_coin_type)
+        return self._greedy_search(current_coins, drop_coin_type, next_coin_type, wall_left_x, wall_right_x)
     
-    def _generate_sample_positions(self, drop_coin_type: CoinType) -> List[float]:
+    def _generate_sample_positions(
+        self,
+        drop_coin_type: CoinType,
+        wall_left_x: Optional[float] = None,
+        wall_right_x: Optional[float] = None
+    ) -> List[float]:
         """
         샘플링할 x 좌표 리스트 생성
         
         Args:
             drop_coin_type: 떨어뜨릴 동전 종류
+            wall_left_x: 왼쪽 벽 안쪽 x좌표
+            wall_right_x: 오른쪽 벽 안쪽 x좌표
             
         Returns:
             x 좌표 리스트
         """
         radius = drop_coin_type.radius
         
+        # 벽 경계 사용 (없으면 게임 전체 너비 기준)
+        left_bound = wall_left_x if wall_left_x is not None else 0
+        right_bound = wall_right_x if wall_right_x is not None else self.game_width
+        
         # 벽에서 동전 반지름만큼 떨어진 위치부터 시작
-        min_x = radius + 10
-        max_x = self.game_width - radius - 10
+        min_x = left_bound + radius + 5
+        max_x = right_bound - radius - 5
         
         # 샘플링 간격으로 위치 생성
         positions = []

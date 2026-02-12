@@ -9,7 +9,19 @@ import json
 import logging
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
-import google.generativeai as genai
+try:
+    from google import genai as _genai_sdk  # type: ignore
+    _HAS_NEW_SDK = True
+except Exception:
+    _genai_sdk = None
+    _HAS_NEW_SDK = False
+
+try:
+    import google.generativeai as _legacy_genai  # type: ignore
+    _HAS_LEGACY_SDK = True
+except Exception:
+    _legacy_genai = None
+    _HAS_LEGACY_SDK = False
 
 from models.coin import Coin, CoinType
 
@@ -119,9 +131,18 @@ class AutoTuner:
         self.api_key = api_key
         self.model_name = model_name
         
-        # Gemini API 초기화
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        # Gemini API 초기화 (신형 SDK 우선)
+        self._client = None
+        self._model_obj = None
+
+        if _HAS_NEW_SDK:
+            self._client = _genai_sdk.Client(api_key=api_key)
+            self._model_obj = model_name  # 신형 SDK는 모델명 문자열 사용
+        elif _HAS_LEGACY_SDK:
+            _legacy_genai.configure(api_key=api_key)
+            self._model_obj = _legacy_genai.GenerativeModel(model_name)
+        else:
+            raise ImportError("Gemini SDK가 설치되지 않았습니다.")
         
         # 파라미터 히스토리
         self.history: List[Tuple[PhysicsParameters, float]] = []
@@ -219,8 +240,15 @@ class AutoTuner:
         
         try:
             # Gemini API 호출
-            response = self.model.generate_content(prompt)
-            response_text = response.text.strip()
+            if _HAS_NEW_SDK and self._client is not None:
+                response = self._client.models.generate_content(
+                    model=self._model_obj,
+                    contents=[prompt],
+                )
+                response_text = (response.text or "").strip()
+            else:
+                response = self._model_obj.generate_content(prompt)
+                response_text = response.text.strip()
             
             # JSON 파싱
             # 코드 블록 제거

@@ -7,7 +7,7 @@
 
 import copy
 import logging
-from typing import List, Tuple, Optional
+from typing import Any, List, Tuple, Optional
 
 from models.coin import Coin, CoinType
 from physics.engine import PhysicsEngine
@@ -69,6 +69,68 @@ class PhysicsSimulator:
         )
         
         logger.info(f"PhysicsSimulator 초기화: {game_width}x{game_height}")
+
+    def get_current_parameters(self):
+        """현재 물리 파라미터 반환 (피드백 루프용).
+
+        반환 타입은 ai.auto_tuner.PhysicsParameters와 호환된다.
+        """
+        # 지연 import로 순환 의존 회피
+        try:
+            from ai.auto_tuner import PhysicsParameters  # type: ignore
+        except Exception:
+            PhysicsParameters = None  # pragma: no cover
+
+        if PhysicsParameters:
+            return PhysicsParameters(
+                gravity=self.gravity,
+                friction=self.coin_friction,
+                elasticity=self.coin_elasticity,
+                damping=self.damping,
+            )
+
+        # 폴백: 딕셔너리 반환
+        return {
+            "gravity": self.gravity,
+            "friction": self.coin_friction,
+            "elasticity": self.coin_elasticity,
+            "damping": self.damping,
+        }
+
+    def update_parameters(self, params: Any):
+        """물리 파라미터 갱신 및 엔진/shape 반영."""
+
+        def _get(name, default):
+            if hasattr(params, name):
+                return getattr(params, name)
+            if isinstance(params, dict):
+                return params.get(name, default)
+            return default
+
+        self.gravity = tuple(_get("gravity", self.gravity))
+        self.damping = float(_get("damping", self.damping))
+        self.coin_friction = float(_get("friction", self.coin_friction))
+        self.coin_elasticity = float(_get("elasticity", self.coin_elasticity))
+
+        # 엔진 속성 업데이트
+        self.engine.gravity = self.gravity
+        self.engine.damping = self.damping
+        self.engine.coin_friction = self.coin_friction
+        self.engine.coin_elasticity = self.coin_elasticity
+
+        # pymunk Space에도 반영
+        self.engine.space.gravity = self.gravity
+        self.engine.space.damping = self.damping
+
+        # 기존 코인 shape 갱신
+        for _, shape in self.engine.coin_bodies.values():
+            shape.friction = self.coin_friction
+            shape.elasticity = self.coin_elasticity
+
+        # 벽/바닥 갱신
+        for wall in self.engine.wall_bodies:
+            wall.friction = self.engine.wall_friction
+            wall.elasticity = self.engine.wall_elasticity
     
     def create_digital_twin(self, coins: List[Coin]) -> PhysicsEngine:
         """

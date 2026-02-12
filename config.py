@@ -75,7 +75,7 @@ STABILITY_WAIT_TIME = 0.5       # 안정 상태 확인 대기 시간 (초)
 # 최적화 알고리즘 설정
 SOLVER_ALGORITHM = "greedy"  # "greedy" 또는 "monte_carlo"
 SOLVER_SAMPLE_STEP = 10      # x좌표 샘플링 간격 (픽셀)
-SOLVER_LOOKAHEAD_DEPTH = 1   # Look-ahead 깊이 (1=현재만, 2=다음 턴까지)
+SOLVER_LOOKAHEAD_DEPTH = 2   # Look-ahead 깊이 (1=현재만, 2=다음 턴까지)
 
 # 평가 함수 가중치
 WEIGHT_LARGE_COIN = 10.0      # 큰 동전 보너스

@@ -210,6 +210,11 @@ class PhysicsEngine:
 
             coin_id_a, body_a, shape_a = body_by_id[a_id]
             coin_id_b, body_b, shape_b = body_by_id[b_id]
+
+            # 이미 이전 merge에서 제거된 경우 스킵
+            if coin_id_a not in self.coin_bodies or coin_id_b not in self.coin_bodies:
+                continue
+
             if shape_a.coin_type != shape_b.coin_type:
                 continue
 
@@ -217,12 +222,18 @@ class PhysicsEngine:
             next_type = coin_type.get_next_level()
 
             # 제거
-            self.space.remove(body_a, shape_a)
-            self.space.remove(body_b, shape_b)
-            if coin_id_a in self.coin_bodies:
-                del self.coin_bodies[coin_id_a]
-            if coin_id_b in self.coin_bodies:
-                del self.coin_bodies[coin_id_b]
+            try:
+                self.space.remove(shape_a, body_a)
+            except Exception:
+                pass
+            try:
+                self.space.remove(shape_b, body_b)
+            except Exception:
+                pass
+            self.coin_bodies.pop(coin_id_a, None)
+            self.coin_bodies.pop(coin_id_b, None)
+            body_by_id.pop(a_id, None)
+            body_by_id.pop(b_id, None)
 
             # 점수 누적(합체로 얻는 점수는 next 코인의 점수로 가정)
             if next_type is not None:

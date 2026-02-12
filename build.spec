@@ -18,6 +18,7 @@ a = Analysis(
     datas=[
         (os.path.join(PROJECT_ROOT, 'config.py'), '.'),
         (os.path.join(PROJECT_ROOT, 'api.txt'), '.'),
+        (os.path.join(PROJECT_ROOT, 'knowledge'), 'knowledge'),
     ],
     hiddenimports=[
         'models',
@@ -33,6 +34,9 @@ a = Analysis(
         'solver.strategy',
         'ui',
         'ui.overlay',
+        'ai',
+        'ai.auto_tuner',
+        'ai.feedback_loop',
         'utils',
         'utils.coordinate_mapper',
         'utils.state_detector',
@@ -56,7 +60,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[os.path.join(PROJECT_ROOT, 'pyi_rth_utf8.py')],
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

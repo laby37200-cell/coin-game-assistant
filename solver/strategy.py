@@ -15,15 +15,21 @@ logger = logging.getLogger(__name__)
 class StrategyEvaluator:
     """수박게임 전략 기반 상태 평가 클래스"""
     
+    # 천장 라인 — 이 위로 동전이 올라가면 게임오버
+    # 이미지 기준 y좌표 (screen coords, y-down). Gemini가 감지한 좌표 기준.
+    DEFAULT_CEILING_Y = 200  # 흰 점선 위치 (화면 상단에서 약 200px)
+
     def __init__(
         self,
         game_width: int,
         game_height: int,
+        ceiling_y: float = None,
         weight_large_coin: float = 10.0,
-        weight_adjacency: float = 5.0,
-        weight_height_penalty: float = -2.0,
+        weight_adjacency: float = 8.0,
+        weight_height_penalty: float = -3.0,
         weight_corner_bonus: float = 3.0,
         weight_blocking_penalty: float = -20.0,
+        weight_chain_merge: float = 30.0,
         prefer_corner: bool = True,
         left_to_right: bool = True
     ):
@@ -31,16 +37,19 @@ class StrategyEvaluator:
         Args:
             game_width: 게임 영역 너비
             game_height: 게임 영역 높이
+            ceiling_y: 천장 y좌표 (screen coords). 이 위로 동전이 올라가면 게임오버.
             weight_large_coin: 큰 동전 보너스 가중치
             weight_adjacency: 인접도 보너스 가중치
             weight_height_penalty: 높이 페널티 가중치
             weight_corner_bonus: 구석 배치 보너스 가중치
             weight_blocking_penalty: 블로킹 페널티 가중치
+            weight_chain_merge: 연쇄 합체 보너스 가중치
             prefer_corner: 큰 동전을 구석에 배치하는 전략 사용
             left_to_right: 좌→우 정렬 전략 사용
         """
         self.game_width = game_width
         self.game_height = game_height
+        self.ceiling_y = ceiling_y if ceiling_y is not None else self.DEFAULT_CEILING_Y
         
         # 가중치
         self.weight_large_coin = weight_large_coin
@@ -48,12 +57,13 @@ class StrategyEvaluator:
         self.weight_height_penalty = weight_height_penalty
         self.weight_corner_bonus = weight_corner_bonus
         self.weight_blocking_penalty = weight_blocking_penalty
+        self.weight_chain_merge = weight_chain_merge
         
         # 전략 플래그
         self.prefer_corner = prefer_corner
         self.left_to_right = left_to_right
         
-        logger.info("StrategyEvaluator 초기화 완료")
+        logger.info(f"StrategyEvaluator 초기화: ceiling_y={self.ceiling_y}, target=2700")
     
     def evaluate(self, coins: List[Coin]) -> float:
         """
@@ -70,13 +80,16 @@ class StrategyEvaluator:
         
         score = 0.0
         
+        # 0. 천장 게임오버 체크 (최우선 — 천장 넘으면 치명적 페널티)
+        score += self._evaluate_ceiling(coins)
+        
         # 1. 큰 동전 보너스
         score += self._evaluate_large_coins(coins)
         
-        # 2. 같은 동전 인접도 보너스
+        # 2. 같은 동전 인접도 보너스 (합체 가능성)
         score += self._evaluate_adjacency(coins)
         
-        # 3. 높이 페널티
+        # 3. 높이 페널티 (천장에 가까울수록 지수적 증가)
         score += self._evaluate_height(coins)
         
         # 4. 구석 배치 보너스
@@ -89,6 +102,12 @@ class StrategyEvaluator:
         # 6. 좌우 정렬 보너스
         if self.left_to_right:
             score += self._evaluate_sorting(coins)
+        
+        # 7. 연쇄 합체 보너스
+        score += self._evaluate_chain_merge(coins)
+        
+        # 8. 동전 수 감소 보너스 (동전이 적을수록 좋음 — 합체가 잘 된 상태)
+        score -= len(coins) * 2.0
         
         return score
     
@@ -124,19 +143,37 @@ class StrategyEvaluator:
         
         return score
     
+    def _evaluate_ceiling(self, coins: List[Coin]) -> float:
+        """천장 게임오버 체크 — 동전이 천장 위로 올라가면 치명적 페널티"""
+        penalty = 0.0
+        for coin in coins:
+            coin_top = coin.y - coin.radius  # screen coords (y-down)
+            if coin_top < self.ceiling_y:
+                # 천장 위로 올라간 동전 — 게임오버 위험
+                over = self.ceiling_y - coin_top
+                penalty -= 5000 + over * 100  # 치명적 페널티
+        return penalty
+
     def _evaluate_height(self, coins: List[Coin]) -> float:
-        """높이 페널티 계산 (높이 쌓일수록 감점)"""
+        """높이 페널티 계산 — 천장에 가까울수록 지수적으로 증가"""
         if not coins:
             return 0.0
         
-        # 가장 높은 동전의 상단 y 좌표
-        min_y = min(coin.y - coin.radius for coin in coins)
+        penalty = 0.0
+        for coin in coins:
+            coin_top = coin.y - coin.radius  # screen coords (y-down)
+            # 천장까지의 여유 거리
+            margin = coin_top - self.ceiling_y
+            if margin < 0:
+                continue  # _evaluate_ceiling에서 처리
+            elif margin < 50:
+                # 천장 근처 — 지수적 페널티
+                penalty += self.weight_height_penalty * (50 - margin) ** 2 * 0.1
+            elif margin < 150:
+                # 중간 높이 — 선형 페널티
+                penalty += self.weight_height_penalty * (150 - margin) * 0.5
         
-        # 높이가 낮을수록 (y가 클수록) 페널티 감소
-        # 화면 상단(y=0)에 가까울수록 페널티 증가
-        height_penalty = min_y * self.weight_height_penalty
-        
-        return height_penalty
+        return penalty
     
     def _evaluate_corner_placement(self, coins: List[Coin]) -> float:
         """구석 배치 보너스 계산"""
@@ -206,11 +243,53 @@ class StrategyEvaluator:
             level_diff = sorted_coins[i+1].coin_type.level - sorted_coins[i].coin_type.level
             
             if level_diff > 0:
-                # 레벨이 증가하면 보너스
                 score += 2.0 * level_diff
             elif level_diff < 0:
-                # 레벨이 감소하면 약간의 페널티
                 score -= 0.5 * abs(level_diff)
+        
+        return score
+
+    def _evaluate_chain_merge(self, coins: List[Coin]) -> float:
+        """
+        연쇄 합체 가능성 보너스.
+        같은 종류 동전이 3개 이상 근접해 있으면 연쇄 합체 가능 → 큰 보너스.
+        합체 후 생기는 상위 동전이 또 같은 종류와 인접하면 추가 보너스.
+        """
+        score = 0.0
+        
+        # 종류별로 동전 그룹핑
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for coin in coins:
+            groups[coin.coin_type].append(coin)
+        
+        for coin_type, group in groups.items():
+            if len(group) < 2:
+                continue
+            
+            # 같은 종류 동전 쌍 중 합체 가능 거리에 있는 쌍 수
+            merge_pairs = 0
+            for i, c1 in enumerate(group):
+                for c2 in group[i+1:]:
+                    dist = c1.distance_to(c2)
+                    touch_dist = (c1.radius + c2.radius) * 1.2
+                    if dist < touch_dist:
+                        merge_pairs += 1
+            
+            if merge_pairs >= 1:
+                # 합체 가능 쌍이 있음
+                score += self.weight_chain_merge * merge_pairs
+                
+                # 연쇄 가능성: 합체 후 상위 동전이 같은 종류와 인접한지
+                next_type = coin_type.get_next_level()
+                if next_type and next_type in groups:
+                    for upper in groups[next_type]:
+                        for c in group:
+                            dist = c.distance_to(upper)
+                            if dist < (c.radius + upper.radius) * 2.5:
+                                # 연쇄 합체 가능!
+                                score += self.weight_chain_merge * 2
+                                break
         
         return score
     
@@ -225,12 +304,15 @@ class StrategyEvaluator:
             각 평가 항목별 점수
         """
         details = {
+            'ceiling': self._evaluate_ceiling(coins),
             'large_coins': self._evaluate_large_coins(coins),
             'adjacency': self._evaluate_adjacency(coins),
             'height': self._evaluate_height(coins),
             'corner': self._evaluate_corner_placement(coins) if self.prefer_corner else 0.0,
             'blocking': self._evaluate_blocking(coins),
             'sorting': self._evaluate_sorting(coins) if self.left_to_right else 0.0,
+            'chain_merge': self._evaluate_chain_merge(coins),
+            'coin_count_penalty': -len(coins) * 2.0,
             'total': self.evaluate(coins)
         }
         

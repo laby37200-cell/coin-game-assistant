@@ -38,62 +38,65 @@ class GeminiAnalyzer:
     """Gemini API를 사용한 화면 분석 클래스"""
     
     # Gemini에게 전달할 시스템 프롬프트
-    SYSTEM_PROMPT = """너는 '콘텐츠페이 동전게임'(수박게임의 변형판) 전문 분석가다.
+    SYSTEM_PROMPT = """너는 dailygame.kr 의 '콘텐츠페이 동전게임'(수박게임 변형) 화면 분석 전문가다.
 
-게임 화면 이미지를 분석하여 다음 정보를 JSON 형식으로 정확하게 반환해야 한다:
-1. **현재 화면에 있는 모든 동전의 정보**:
-   - 동전 종류: 검정번개, 핑크동전, 주황동전, 노랑동전, 민트동전, 파랑동전, 보라동전, 갈색동전, 흰색상자, 노랑전구, 민트선물상자
-   - 중심 좌표 (x, y) - 픽셀 단위
-   - 반지름 (radius) - 픽셀 단위
+**게임 화면 구조** (MuMu 에뮬레이터 캡처 이미지 기준):
+- 이미지 최상단: 안드로이드 상태바 + 브라우저 주소창 (분석 대상 아님)
+- 그 아래: 게임 UI 상단 바 (HOME 버튼, 점수, 코인 수)
+- **현재 동전**: 게임 상단 중앙에 크게 표시된 동전 — 지금 떨어뜨릴 동전
+- **다음 동전**: 현재 동전 오른쪽에 작게 표시된 동전 — 다음 차례 동전
+- **양쪽 벽**: 갈색 벽돌 무늬 세로 벽이 좌우에 있음. 벽 안쪽만 드롭 가능
+- **바닥**: 벽 하단에 초록색 바닥
+- **게임 플레이 영역**: 양쪽 벽 사이의 하늘색 공간 (동전이 쌓이는 곳)
 
-2. **다음에 떨어질 동전 (Next)**: 
-   - 화면 상단에 표시된 "다음 동전"의 종류
-   - 랜덤으로 떨어지는 동전은 검정번개~파랑동전까지만 가능
+**분석 항목**:
+1. **현재 떨어뜨릴 동전 (current_coin)**: 화면 상단 중앙의 큰 동전 종류
+2. **다음 동전 (next_coin)**: 현재 동전 오른쪽의 작은 동전 종류
+3. **바닥에 쌓인 동전들 (coins)**: 벽 사이 게임 영역 안에 있는 모든 동전
+   - 동전이 하나도 없으면 빈 배열 []
+4. **벽 위치 (wall_left_x, wall_right_x)**: 왼쪽 벽 안쪽 경계 x좌표, 오른쪽 벽 안쪽 경계 x좌표
 
-3. **게임 영역 크기**:
-   - 너비 (width)
-   - 높이 (height)
+**동전 종류** (작은 것부터 큰 것 순서):
+- 검정번개 (가장 작음, ~20px 반지름, 검정색 번개 모양)
+- 핑크동전 (~25px, 분홍색 하트)
+- 주황동전 (~30px, 주황색)
+- 노랑동전 (~35px, 노란색 별)
+- 민트동전 (~40px, 초록색 클로버)
+- 파랑동전 (~50px, 파란색 다이아몬드)
+- 보라동전 (~60px, 보라색)
+- 갈색동전 (~70px, 갈색)
+- 흰색상자 (~85px, 흰색 상자)
+- 노랑전구 (~100px, 노란색 전구)
+- 민트선물상자 (가장 큼, ~120px, 민트색 선물상자)
 
-**동전 크기 참고**:
-- 검정번개 (가장 작음, 약 20px 반지름)
-- 핑크동전 (약 25px)
-- 주황동전 (약 30px)
-- 노랑동전 (약 35px)
-- 민트동전 (약 40px)
-- 파랑동전 (약 50px)
-- 보라동전 (약 60px)
-- 갈색동전 (약 70px)
-- 흰색상자 (약 85px)
-- 노랑전구 (약 100px)
-- 민트선물상자 (가장 큼, 약 120px 반지름)
+5. **실제 게임 점수 (game_score)**: 상단 바의 노란 동전 아이콘 옆에 표시된 숫자 (예: 499)
+6. **천장 라인 y좌표 (ceiling_y)**: 흰색 점선의 y좌표. 이 위로 동전이 올라가면 게임오버.
 
-**출력 형식 (JSON)**:
+**출력 형식 (JSON만 출력)**:
 ```json
 {
+  "current_coin": "현재동전종류",
+  "next_coin": "다음동전종류",
   "coins": [
-    {
-      "type": "동전종류",
-      "x": 중심x좌표,
-      "y": 중심y좌표,
-      "radius": 반지름
-    },
+    {"type": "동전종류", "x": 중심x, "y": 중심y, "radius": 반지름},
     ...
   ],
-  "next_coin": "다음동전종류",
-  "game_area": {
-    "width": 너비,
-    "height": 높이
-  }
+  "wall_left_x": 왼쪽벽안쪽x좌표,
+  "wall_right_x": 오른쪽벽안쪽x좌표,
+  "game_score": 실제게임점수숫자,
+  "ceiling_y": 천장흰점선y좌표,
+  "game_area": {"width": 벽사이너비, "height": 게임영역높이}
 }
 ```
 
 **중요 규칙**:
-- 좌표는 이미지의 왼쪽 상단을 (0, 0)으로 하는 픽셀 좌표계를 사용한다.
-- 동전의 크기는 종류에 따라 다르다: 검정번개(작음) → 민트선물상자(큼)
-- 모든 동전을 빠짐없이 정확하게 감지해야 한다.
-- 겹쳐진 동전도 최대한 정확하게 분리하여 인식한다.
-- JSON 형식만 출력하고, 다른 설명은 포함하지 않는다.
-- 동전 색상 참고: 검정(번개), 핑크, 주황, 노랑, 민트, 파랑, 보라, 갈색, 흰색, 노랑(전구), 민트(선물상자)
+- 좌표는 이미지 왼쪽 상단 (0,0) 기준 픽셀 좌표
+- current_coin은 반드시 감지해야 한다 (게임 중이면 항상 존재)
+- coins 배열이 비어있어도 current_coin과 next_coin은 반환해야 한다
+- 벽 위치(wall_left_x, wall_right_x)를 정확히 감지해야 한다
+- game_score는 상단 바의 노란 동전 옆 숫자를 정확히 읽어야 한다
+- ceiling_y는 흰색 점선의 y좌표를 정확히 감지해야 한다
+- JSON만 출력하고 다른 설명은 포함하지 않는다
 """
     
     def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash", max_calls_per_minute: int = 10):
@@ -290,7 +293,22 @@ class GeminiAnalyzer:
         
         return CoinType.from_name(next_coin_name)
     
-    def analyze_and_extract(self, image: Image.Image) -> tuple[List[Coin], Optional[CoinType], Dict]:
+    def get_current_coin_type(self, analysis_result: Dict) -> Optional[CoinType]:
+        """
+        분석 결과에서 현재 떨어뜨릴 동전 타입 추출
+        
+        Args:
+            analysis_result: analyze_image()의 반환값
+            
+        Returns:
+            현재 동전의 CoinType 또는 None
+        """
+        name = analysis_result.get('current_coin')
+        if not name:
+            return None
+        return CoinType.from_name(name)
+
+    def analyze_and_extract(self, image: Image.Image) -> tuple[List[Coin], Optional[CoinType], Optional[CoinType], Dict]:
         """
         이미지 분석 및 동전 추출을 한 번에 수행
         
@@ -298,24 +316,32 @@ class GeminiAnalyzer:
             image: PIL Image 객체
             
         Returns:
-            (동전 리스트, 다음 동전 타입, 게임 영역 정보)
+            (동전 리스트, 현재 동전 타입, 다음 동전 타입, 게임 영역 정보)
+            게임 영역 정보에 wall_left_x, wall_right_x 포함
         """
         # 이미지 분석
         result = self.analyze_image(image)
         
         if not result:
-            return [], None, {}
+            return [], None, None, {}
         
         # 동전 추출
         coins = self.extract_coins(result)
         
+        # 현재 동전 타입 (지금 떨어뜨릴 동전)
+        current_coin = self.get_current_coin_type(result)
+        
         # 다음 동전 타입
         next_coin = self.get_next_coin_type(result)
         
-        # 게임 영역
+        # 게임 영역 (벽 위치, 점수, 천장 포함)
         game_area = result.get('game_area', {})
+        game_area['wall_left_x'] = result.get('wall_left_x')
+        game_area['wall_right_x'] = result.get('wall_right_x')
+        game_area['game_score'] = result.get('game_score')
+        game_area['ceiling_y'] = result.get('ceiling_y')
         
-        return coins, next_coin, game_area
+        return coins, current_coin, next_coin, game_area
 
 
 # 테스트 코드

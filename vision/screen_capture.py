@@ -49,6 +49,9 @@ class ScreenCapture:
         
         logger.info(f"ScreenCapture 초기화: 창 패턴 = '{window_title_pattern}'")
     
+    # 브라우저 등 에뮬레이터가 아닌 창을 걸러내기 위한 키워드
+    _EXCLUDE_KEYWORDS = ("Chrome", "Edge", "Firefox", "Opera", "Brave", "Safari")
+
     def find_window(self) -> bool:
         """
         MuMu Player 창 찾기
@@ -57,22 +60,63 @@ class ScreenCapture:
             성공 여부
         """
         try:
-            windows = gw.getWindowsWithTitle(self.window_title_pattern)
-            
-            if not windows:
+            # 여러 패턴으로 시도 (Android Device 우선 — 실제 게임 렌더링 창)
+            patterns = [self.window_title_pattern]
+            if "MuMu" in self.window_title_pattern:
+                patterns = ["Android Device", "MuMu Android Device",
+                            self.window_title_pattern, "MuMuPlayer", "MuMu Player"]
+
+            candidates = []
+            seen_titles = set()
+            for pat in patterns:
+                for w in gw.getWindowsWithTitle(pat):
+                    if w.title not in seen_titles:
+                        seen_titles.add(w.title)
+                        candidates.append(w)
+
+            if not candidates:
                 logger.warning(f"'{self.window_title_pattern}' 패턴을 가진 창을 찾을 수 없습니다.")
                 return False
+
+            # 브라우저 창 제외
+            filtered = [w for w in candidates
+                        if not any(kw in w.title for kw in self._EXCLUDE_KEYWORDS)]
+            if not filtered:
+                filtered = candidates  # 모두 브라우저면 원본 사용
+
+            # 가장 적합한 창 선택 (크기가 유효한 것 우선)
+            valid = [w for w in filtered if w.width > 100 and w.height > 100]
+            self.window = valid[0] if valid else filtered[0]
+
+            logger.info(f"창 발견: '{self.window.title}' at ({self.window.left}, {self.window.top}) "
+                        f"size={self.window.width}x{self.window.height}")
             
-            # 첫 번째 매칭 창 선택
-            self.window = windows[0]
-            logger.info(f"창 발견: {self.window.title} at ({self.window.left}, {self.window.top})")
-            
-            # 게임 영역 설정 (전체 창)
+            # 게임 영역 설정 — 클라이언트 영역 기준 (타이틀바/테두리 제외)
+            area_left = self.window.left
+            area_top = self.window.top
+            area_w = self.window.width
+            area_h = self.window.height
+
+            if _HAS_WIN32:
+                try:
+                    hwnd = self._get_hwnd()
+                    if hwnd:
+                        # 클라이언트 영역의 화면 좌표
+                        pt = win32gui.ClientToScreen(hwnd, (0, 0))
+                        cr = win32gui.GetClientRect(hwnd)
+                        area_left = pt[0]
+                        area_top = pt[1]
+                        area_w = cr[2] - cr[0]
+                        area_h = cr[3] - cr[1]
+                        logger.info(f"클라이언트 영역: ({area_left},{area_top}) {area_w}x{area_h}")
+                except Exception as e:
+                    logger.debug(f"ClientToScreen 실패: {e}")
+
             self.game_area = {
-                'left': self.window.left,
-                'top': self.window.top,
-                'width': self.window.width,
-                'height': self.window.height
+                'left': area_left,
+                'top': area_top,
+                'width': area_w,
+                'height': area_h
             }
             
             return True
@@ -167,10 +211,16 @@ class ScreenCapture:
             self.last_screenshot = img
             self.last_capture_time = time.time()
 
-            # game_area 크기 동기화
-            if self.game_area['width'] != w or self.game_area['height'] != h:
-                self.game_area['width'] = w
-                self.game_area['height'] = h
+            # game_area를 클라이언트 영역 기준으로 동기화
+            # ClientToScreen으로 클라이언트 영역의 실제 화면 좌표를 구함
+            try:
+                pt = win32gui.ClientToScreen(hwnd, (0, 0))
+                self.game_area['left'] = pt[0]
+                self.game_area['top'] = pt[1]
+            except Exception:
+                pass  # fallback: 기존 window.left/top 유지
+            self.game_area['width'] = w
+            self.game_area['height'] = h
 
             return img
 

@@ -183,10 +183,10 @@ class FeedbackLoop:
             self.simulator.update_parameters(new_params)
             
             # 재시뮬레이션
-            new_predicted = self.simulator.simulate_drop(
+            new_predicted, _ = self.simulator.simulate_drop(
                 recent_feedback.before_state,
-                recent_feedback.drop_x,
-                recent_feedback.drop_coin
+                recent_feedback.drop_coin,
+                recent_feedback.drop_x
             )
             
             # 정확도 계산
